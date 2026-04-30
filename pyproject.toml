@@ -1,0 +1,21 @@
+[project]
+name = "pptGenerationSkill"
+version = "0.1.0"
+description = "Weekly report PPT generation skill"
+requires-python = ">=3.10"
+
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn>=0.23.0",
+    "python-multipart>=0.0.9",
+    "llama-index>=0.10.0",
+    "llama-index-readers-file>=0.1.0",
+    "docx2txt>=0.8",
+    "beautifulsoup4>=4.12.0",
+    "html2text>=2024.2.26",
+    "nbconvert>=7.16.0",
+    "olefile>=0.47",
+    "pillow>=10.4.0",
+    "pypdf>=4.3.0",
+    "python-pptx>=0.6.23",
+]

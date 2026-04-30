@@ -2,3 +2,15 @@ fastapi>=0.110.0
 uvicorn>=0.23.0
 python-multipart>=0.0.9
 llama-index>=0.10.0
+llama-index-readers-file>=0.1.0
+docx2txt>=0.8
+beautifulsoup4>=4.12.0
+EbookLib>=0.18
+html2text>=2024.2.26
+nbconvert>=7.16.0
+olefile>=0.47
+openai-whisper @ git+https://github.com/openai/whisper.git
+pillow>=10.4.0
+pydub>=0.25.1
+pypdf>=4.3.0
+python-pptx>=0.6.23
