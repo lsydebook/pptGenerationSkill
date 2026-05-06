@@ -26,7 +26,6 @@ class ParseResponse(BaseModel):
 async def parse_file(
     file: UploadFile = File(...),
     note: str | None = Form(default=None),
-    image_output_dir: str | None = Form(default=None),
 ) -> ParseResponse:
     if not file.filename:
         raise HTTPException(status_code=400, detail="missing filename")
@@ -55,7 +54,6 @@ async def parse_file(
             filename=file.filename,
             content_type=file.content_type,
             note=note,
-            image_output_dir=image_output_dir,
         )
     except ParseError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
