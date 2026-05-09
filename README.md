@@ -16,6 +16,24 @@ Parse one uploaded file and return extracted documents.
 curl -X POST "http://localhost:8000/v1/parse" \
 	-F "file=@/path/to/weekly.md" \
 	-F "note=optional note"
+
+Parse free-form text with optional image uploads.
+
+```bash
+curl -X POST "http://localhost:8000/v1/parse_text_image" \
+	-F "text=free form notes" \
+	-F "images=@/path/to/figure1.png" \
+	-F "images=@/path/to/figure2.jpg" \
+	-F "note=optional note"
+```
+
+Parse a single image upload (same file field as `/v1/parse`).
+
+```bash
+curl -X POST "http://localhost:8000/v1/parse_image" \
+	-F "file=@/path/to/figure1.png" \
+	-F "note=optional note"
+```
 ```
 
 ### Notes
@@ -23,6 +41,7 @@ curl -X POST "http://localhost:8000/v1/parse" \
 - Supported extensions: .pdf, .md, .markdown, .txt
 - Each parsed document includes `text`, `metadata`, and `assets`.
 - Parsing uses Kohaku-style document segmentation (section → paragraph → sentence).
+- Uploaded images are saved to `IMAGE_UPLOAD_DIR` (default: `uploaded_images`).
 - Concurrency is controlled by `PARSE_CONCURRENCY` (default: 8).
 - Max upload size is controlled by `MAX_FILE_SIZE_MB` (default: 50).
 

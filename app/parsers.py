@@ -1,10 +1,12 @@
 import asyncio
+import hashlib
+import mimetypes
 import os
 import tempfile
 from pathlib import Path
 from typing import Any
 
-from .config import PARSE_CONCURRENCY, SUPPORTED_EXTS
+from .config import IMAGE_UPLOAD_DIR, PARSE_CONCURRENCY, SUPPORTED_EXTS
 from .kohakurag.indexer import DocumentIndexer
 from .kohakurag.parsers import parse_document_path
 from .kohakurag.types import DocumentPayload, NodeKind
@@ -15,9 +17,57 @@ class ParseError(RuntimeError):
 
 
 _SEMAPHORE = asyncio.Semaphore(PARSE_CONCURRENCY)
+
 def _safe_filename(filename: str) -> str:
     name = os.path.basename(filename).strip()
     return name or "upload"
+
+
+def _resolve_image_output_dir() -> str:
+    output_dir = os.path.abspath(IMAGE_UPLOAD_DIR)
+    os.makedirs(output_dir, exist_ok=True)
+    return output_dir
+
+
+def save_image_uploads(
+    images: list[tuple[str, bytes, str | None]],
+    *,
+    note: str | None = None,
+) -> list[dict[str, Any]]:
+    if not images:
+        return []
+
+    output_dir = _resolve_image_output_dir()
+    assets: list[dict[str, Any]] = []
+    for filename, data, content_type in images:
+        safe_name = _safe_filename(filename)
+        base, ext = os.path.splitext(safe_name)
+        ext = ext.lower() or ".bin"
+        digest = hashlib.sha256(data).hexdigest()
+        stored_name = f"{base}-{digest[:12]}{ext}"
+        path = os.path.join(output_dir, stored_name)
+        with open(path, "wb") as handle:
+            handle.write(data)
+
+        mime_type = content_type or mimetypes.guess_type(filename)[0]
+        metadata = {
+            "source_type": "user_upload",
+            "stored_filename": stored_name,
+        }
+        if note:
+            metadata["note"] = note
+
+        assets.append(
+            {
+                "filename": filename or safe_name,
+                "mime_type": mime_type or "application/octet-stream",
+                "sha256": digest,
+                "size_bytes": len(data),
+                "path": path,
+                "metadata": metadata,
+            }
+        )
+    return assets
 
 
 def _documents_from_payload(payload: DocumentPayload) -> list[dict[str, Any]]:
