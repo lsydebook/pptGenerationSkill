@@ -10,38 +10,45 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 ### API
 
-Parse one uploaded file and return extracted documents.
+Parse uploaded file and free-form text, each will be parsed independently if both are provided.
 
 ```bash
 curl -X POST "http://localhost:8000/v1/parse" \
 	-F "file=@/path/to/weekly.md" \
 	-F "note=optional note"
+```
 
-Parse free-form text with optional image uploads.
+Parse free-form text.
 
 ```bash
-curl -X POST "http://localhost:8000/v1/parse_text_image" \
+curl -X POST "http://localhost:8000/v1/parse" \
 	-F "text=free form notes" \
-	-F "images=@/path/to/figure1.png" \
-	-F "images=@/path/to/figure2.jpg" \
 	-F "note=optional note"
 ```
 
-Parse a single image upload (same file field as `/v1/parse`).
+Upload a single image (currently no parsing).
 
 ```bash
-curl -X POST "http://localhost:8000/v1/parse_image" \
+curl -X POST "http://localhost:8000/v1/parse" \
 	-F "file=@/path/to/figure1.png" \
 	-F "note=optional note"
 ```
+
+Upload a document and text together (both are parsed and merged in one response).
+
+```bash
+curl -X POST "http://localhost:8000/v1/parse" \
+	-F "file=@/path/to/weekly.md" \
+	-F "text=free form notes" \
+	-F "note=optional note"
 ```
 
 ### Notes
 
-- Supported extensions: .pdf, .md, .markdown, .txt
+- Supported extensions: .pdf, .md, .markdown, .txt, and common images (.png, .jpg, .jpeg, .gif, .webp, .bmp, .tiff)
 - Each parsed document includes `text`, `metadata`, and `assets`.
 - Parsing uses Kohaku-style document segmentation (section → paragraph → sentence).
-- Uploaded images are saved to `IMAGE_UPLOAD_DIR` (default: `uploaded_images`).
+- Image uploads are accepted but not parsed yet.
 - Concurrency is controlled by `PARSE_CONCURRENCY` (default: 8).
 - Max upload size is controlled by `MAX_FILE_SIZE_MB` (default: 50).
 

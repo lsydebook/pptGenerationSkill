@@ -7,9 +7,9 @@ from pathlib import Path
 from typing import Any
 
 from .config import IMAGE_UPLOAD_DIR, PARSE_CONCURRENCY, SUPPORTED_EXTS
-from .kohakurag.indexer import DocumentIndexer
-from .kohakurag.parsers import parse_document_path
-from .kohakurag.types import DocumentPayload, NodeKind
+from .document_parser.indexer import DocumentIndexer
+from .document_parser.parsers import parse_document_path
+from .document_parser.types import DocumentPayload, NodeKind
 
 
 class ParseError(RuntimeError):
