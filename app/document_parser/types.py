@@ -49,3 +49,21 @@ class TreeNode:
     metadata: dict[str, Any]
     parent_id: str | None = None
     children: list["TreeNode"] = field(default_factory=list)
+
+
+@dataclass
+class StoredNode:
+    node_id: str
+    parent_id: str | None
+    kind: NodeKind
+    title: str
+    text: str
+    metadata: dict[str, Any]
+    embedding: list[float]
+    child_ids: list[str] = field(default_factory=list)
+
+
+@dataclass
+class RetrievalMatch:
+    node: StoredNode
+    score: float
