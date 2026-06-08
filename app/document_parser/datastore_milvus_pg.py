@@ -1,9 +1,8 @@
-"""Milvus-only node store — replaces the former Milvus + PostgreSQL dual-store.
+"""Milvus-only node store.
 
 All node metadata (text, title, parent_id, child_ids, metadata JSON) is stored
-inline in Milvus alongside the embedding vector, removing the need for a separate
-PostgreSQL metadata store.  The class retains the same public interface so
-callers (RAGIndexer, rag_service) require no changes.
+inline in Milvus alongside the embedding vector.  The class retains the same
+public interface so callers (RAGIndexer, rag_service) require no changes.
 """
 
 from __future__ import annotations

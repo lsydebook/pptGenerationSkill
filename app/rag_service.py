@@ -1,4 +1,4 @@
-"""Shared RAG stack: Jina embedder + Milvus/PostgreSQL + indexing pipeline."""
+"""Shared RAG stack: Jina embedder + Milvus + indexing pipeline."""
 
 from __future__ import annotations
 

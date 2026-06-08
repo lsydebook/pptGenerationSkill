@@ -1,6 +1,6 @@
 # 完整向量化和索引系统
 
-基于KohakuRAG1的实现，本系统提供**本地Jina V4向量化 + Milvus + PostgreSQL**的完整RAG解决方案。
+基于KohakuRAG1的实现，本系统提供**本地Jina V4向量化 + Milvus**的完整RAG解决方案。
 
 ## 系统架构
 
@@ -34,18 +34,18 @@
    └────────┬──────────────────────┘
             │
      ┌──────┴──────┐
-     ▼             ▼
-┌─────────────┐ ┌──────────────┐
-│   Milvus    │ │ PostgreSQL   │
-│  (Vectors)  │ │  (Metadata)  │
-├─────────────┤ ├──────────────┤
-│ - Sentence  │ │ - Hierarchy  │
-│ - Paragraph │ │ - Full text  │
-│ - Section   │ │ - Metadata   │
-│ - Document  │ │ - JSONB cols │
-└─────────────┘ └──────────────┘
-     │             │
-     └─────┬───────┘
+     ▼             
+┌─────────────┐ 
+│   Milvus    │ 
+│  (Vectors + │ 
+│   Metadata) │ 
+├─────────────┤
+│ - Full text │
+│ - Hierarchy │
+│ - Metadata  │
+│ - Embedding │
+└─────────────┘
+           │
            ▼
    ┌──────────────────────┐
    │  MilvusPostgres      │
@@ -113,7 +113,7 @@ Document Input
     ↓
 [5] Convert to StoredNode
     ↓
-[6] Upsert to Milvus + PostgreSQL
+[6] Upsert to Milvus
 ```
 
 **段落嵌入模式**：
@@ -137,9 +137,9 @@ nodes = await index_and_store(
 )
 ```
 
-### 3. **datastore_milvus_pg.py** - 统一存储接口
+### 3. **datastore_milvus_pg.py** - 统一存储接口（Milvus-only）
 
-**向量存储（Milvus）**：
+**Milvus 集合结构**：
 ```
 rag_nodes_vec (主索引)
 ├─ node_id (PK, VARCHAR)
@@ -153,7 +153,7 @@ rag_nodes_images_vec (可选)
 └─ 图像向量
 ```
 
-**元数据存储（PostgreSQL）**：
+**Milvus 存储结构（当前）**：
 ```
 rag_nodes_nodes
 ├─ node_id (PK)
@@ -343,13 +343,10 @@ def _propagate_embeddings(node, para_full_map):
 ### .env 模板
 
 ```env
-# Milvus (向量存储)
+# Milvus (向量 + 元数据存储)
 MILVUS_URI=http://localhost:19530
 MILVUS_TOKEN=
 MILVUS_DB=default
-
-# PostgreSQL (元数据存储)
-PG_DSN=postgresql://user:password@localhost:5432/ragdb
 
 # Jina V4 嵌入模型 (本地推理)
 JINA_MODEL_NAME=jinaai/jina-embeddings-v4
@@ -368,7 +365,6 @@ pip install -e .
 pip install torch>=2.0.0
 pip install transformers>=4.35.0
 pip install pymilvus>=2.4.0
-pip install psycopg[binary]>=3.1.18
 pip install pillow>=10.0.0
 ```
 
@@ -448,7 +444,7 @@ class DocumentIndexer:
     ) -> list[StoredNode]
 ```
 
-### MilvusPostgresNodeStore
+### MilvusPostgresNodeStore（纯 Milvus）
 
 ```python
 class MilvusPostgresNodeStore:
@@ -458,6 +454,7 @@ class MilvusPostgresNodeStore:
         query_vector: Sequence[float],
         k: int = 5,
         kinds: set[NodeKind] | None = None,
+        date_range: tuple[int, int] | None = None,
     ) -> list[RetrievalMatch]
     async def get_context(
         node_id: str,

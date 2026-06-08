@@ -31,7 +31,7 @@ def average_embeddings(child_vectors: Sequence[np.ndarray]) -> np.ndarray:
 
 
 class RAGIndexer:
-    """Parse hierarchical documents, embed with Jina V4, persist to Milvus + PostgreSQL."""
+    """Parse hierarchical documents, embed with Jina V4, persist to Milvus."""
 
     def __init__(
         self,

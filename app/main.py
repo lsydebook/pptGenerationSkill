@@ -64,7 +64,7 @@ async def parse_file(
     text: str | None = Form(default=None),
     note: str | None = Form(default=None),
 ) -> ParseResponse:
-    """Parse document/text, vectorize with Jina V4, and index into Milvus + PostgreSQL."""
+    """Parse document/text, vectorize with Jina V4, and index into Milvus."""
     text_value = text or ""
     if file is None and not text_value.strip():
         raise HTTPException(status_code=400, detail="missing file or text")

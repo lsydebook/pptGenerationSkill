@@ -129,7 +129,7 @@ async def parse_and_index_upload(
     content_type: str | None,
     note: str | None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Parse document bytes, embed with Jina V4, and store in Milvus + PostgreSQL."""
+    """Parse document bytes, embed with Jina V4, and store in Milvus."""
     async with _SEMAPHORE:
         try:
             payload = await asyncio.to_thread(
