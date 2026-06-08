@@ -22,6 +22,7 @@ class MilvusVectorStore:
       - text (VARCHAR)
       - metadata (JSON)
       - child_ids (JSON)
+      - created_at (INT64, Unix timestamp)
       - embedding (FLOAT_VECTOR)
     """
 
@@ -131,6 +132,10 @@ class MilvusVectorStore:
                 dtype=DataType.JSON,
             ),
             FieldSchema(
+                name="created_at",
+                dtype=DataType.INT64,
+            ),
+            FieldSchema(
                 name="embedding",
                 dtype=DataType.FLOAT_VECTOR,
                 dim=self._dimensions,
@@ -179,6 +184,36 @@ class MilvusVectorStore:
         values = [f'"{k.value}"' for k in kinds]
         return f"kind in [{', '.join(values)}]"
 
+    def _build_expr(
+        self,
+        kinds: set[NodeKind] | None = None,
+        *,
+        date_start: int | None = None,
+        date_end: int | None = None,
+        ids: list[str] | None = None,
+    ) -> str | None:
+        """Combine multiple filter clauses into one Milvus expression."""
+        clauses: list[str] = []
+
+        kinds_expr = self._expr_for_kinds(kinds)
+        if kinds_expr:
+            clauses.append(kinds_expr)
+
+        if date_start is not None and date_end is not None:
+            clauses.append(f"created_at >= {date_start} and created_at <= {date_end}")
+        elif date_start is not None:
+            clauses.append(f"created_at >= {date_start}")
+        elif date_end is not None:
+            clauses.append(f"created_at <= {date_end}")
+
+        ids_expr = self._expr_for_ids(ids or [])
+        if ids_expr:
+            clauses.append(ids_expr)
+
+        if not clauses:
+            return None
+        return " and ".join(clauses)
+
     def _score_from_distance(self, distance: float) -> float:
         if self._metric == "COSINE":
             return 1.0 - float(distance)
@@ -206,6 +241,7 @@ class MilvusVectorStore:
                 "text": node.text,
                 "metadata": dict(node.metadata),
                 "child_ids": list(node.child_ids),
+                "created_at": node.created_at or 0,
                 "embedding": _vector_to_list(node.embedding),
             }
             for node in nodes
@@ -252,6 +288,7 @@ class MilvusVectorStore:
                     "text": node.text,
                     "metadata": dict(node.metadata),
                     "child_ids": list(node.child_ids),
+                    "created_at": node.created_at or 0,
                     "embedding": _vector_to_list(_bytes_to_float_list(full_emb)),
                 }
             )
@@ -274,7 +311,7 @@ class MilvusVectorStore:
         expr = f'node_id == "{node_id.replace("\"", "\\\"")}"'
         results = self.collection.query(
             expr=expr,
-            output_fields=["node_id", "parent_id", "kind", "title", "text", "metadata", "child_ids", "embedding"],
+            output_fields=["node_id", "parent_id", "kind", "title", "text", "metadata", "child_ids", "created_at", "embedding"],
         )
         if not results:
             return None
@@ -290,7 +327,7 @@ class MilvusVectorStore:
 
         results = self.collection.query(
             expr=expr,
-            output_fields=["node_id", "parent_id", "kind", "title", "text", "metadata", "child_ids", "embedding"],
+            output_fields=["node_id", "parent_id", "kind", "title", "text", "metadata", "child_ids", "created_at", "embedding"],
         )
         return {r["node_id"]: self._row_to_dict(r) for r in results}
 
@@ -305,6 +342,7 @@ class MilvusVectorStore:
             "text": row.get("text", ""),
             "metadata": row.get("metadata", {}) or {},
             "child_ids": row.get("child_ids", []) or [],
+            "created_at": row.get("created_at", 0) or 0,
         }
 
     def fetch_embedding(self, node_id: str) -> list[float]:
@@ -323,11 +361,14 @@ class MilvusVectorStore:
         query_vector: Sequence[float],
         k: int,
         kinds: set[NodeKind] | None,
+        *,
+        date_start: int | None = None,
+        date_end: int | None = None,
     ) -> list[tuple[str, float]]:
         if collection is None:
             return []
 
-        expr = self._expr_for_kinds(kinds)
+        expr = self._build_expr(kinds, date_start=date_start, date_end=date_end)
         results = collection.search(
             data=[_vector_to_list(query_vector)],
             anns_field="embedding",
@@ -345,12 +386,15 @@ class MilvusVectorStore:
         query_vector: Sequence[float],
         k: int,
         kinds: set[NodeKind] | None,
+        *,
+        date_start: int | None = None,
+        date_end: int | None = None,
     ) -> list[dict]:
         """Search and return full row dicts (including text/metadata)."""
         if collection is None:
             return []
 
-        expr = self._expr_for_kinds(kinds)
+        expr = self._build_expr(kinds, date_start=date_start, date_end=date_end)
         results = collection.search(
             data=[_vector_to_list(query_vector)],
             anns_field="embedding",
@@ -359,7 +403,7 @@ class MilvusVectorStore:
             expr=expr,
             output_fields=[
                 "node_id", "parent_id", "kind", "title", "text",
-                "metadata", "child_ids", "embedding",
+                "metadata", "child_ids", "created_at", "embedding",
             ],
         )
         hits = results[0] if results else []

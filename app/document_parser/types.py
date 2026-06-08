@@ -61,6 +61,7 @@ class StoredNode:
     metadata: dict[str, Any]
     embedding: list[float]
     child_ids: list[str] = field(default_factory=list)
+    created_at: int = 0  # Unix timestamp (seconds), 0 = unknown
 
 
 @dataclass

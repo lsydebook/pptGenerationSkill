@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from typing import Literal, Sequence
 
 import numpy as np
@@ -67,7 +68,11 @@ class RAGIndexer:
         print("[Indexing] Computing embeddings...")
         await self._embed_tree(root)
 
-        stored_nodes = [self._to_stored(node) for node in self._tree_indexer.flatten(root)]
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        stored_nodes = [
+            self._to_stored(node, created_at=now_ts)
+            for node in self._tree_indexer.flatten(root)
+        ]
 
         print(f"[Indexing] Persisting {len(stored_nodes)} nodes...")
         await self._datastore.upsert_nodes(stored_nodes)
@@ -137,7 +142,7 @@ class RAGIndexer:
 
         return node.embedding
 
-    def _to_stored(self, node: TreeNode) -> StoredNode:
+    def _to_stored(self, node: TreeNode, *, created_at: int = 0) -> StoredNode:
         if node.embedding is None:
             raise ValueError(f"Node {node.node_id} is missing an embedding.")
 
@@ -154,6 +159,7 @@ class RAGIndexer:
             metadata=node.metadata,
             embedding=embedding,
             child_ids=[child.node_id for child in node.children],
+            created_at=created_at,
         )
 
 

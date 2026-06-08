@@ -135,6 +135,7 @@ class MilvusPostgresNodeStore:
             metadata=row.get("metadata", {}),
             embedding=vector,
             child_ids=list(row.get("child_ids", [])),
+            created_at=row.get("created_at", 0) or 0,
         )
 
     async def get_node(self, node_id: str) -> StoredNode:
@@ -156,10 +157,16 @@ class MilvusPostgresNodeStore:
         query_vector: Sequence[float],
         k: int,
         kinds: set[NodeKind] | None,
+        *,
+        date_start: int | None = None,
+        date_end: int | None = None,
     ) -> list[tuple[str, float]]:
         if collection is None:
             return []
-        return self._vector_store.search(collection, query_vector, k, kinds)
+        return self._vector_store.search(
+            collection, query_vector, k, kinds,
+            date_start=date_start, date_end=date_end,
+        )
 
     async def search(
         self,
@@ -168,8 +175,10 @@ class MilvusPostgresNodeStore:
         k: int = 5,
         kinds: set[NodeKind] | None = None,
         paragraph_search_mode: ParagraphSearchMode | None = None,
+        date_range: tuple[int, int] | None = None,
     ) -> list[RetrievalMatch]:
         mode = paragraph_search_mode or self._paragraph_search_mode
+        date_start, date_end = date_range if date_range else (None, None)
 
         loop = asyncio.get_event_loop()
         main_hits = await loop.run_in_executor(
@@ -179,6 +188,8 @@ class MilvusPostgresNodeStore:
             query_vector,
             k,
             kinds,
+            date_start=date_start,
+            date_end=date_end,
         )
 
         para_hits: list[tuple[str, float]] = []
@@ -190,6 +201,8 @@ class MilvusPostgresNodeStore:
                 query_vector,
                 k,
                 kinds,
+                date_start=date_start,
+                date_end=date_end,
             )
 
         all_hits = main_hits + para_hits
