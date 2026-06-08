@@ -1,4 +1,12 @@
-"""Milvus + PostgreSQL backed node store."""
+"""Milvus-only node store — replaces the former Milvus + PostgreSQL dual-store.
+
+All node metadata (text, title, parent_id, child_ids, metadata JSON) is stored
+inline in Milvus alongside the embedding vector, removing the need for a separate
+PostgreSQL metadata store.  The class retains the same public interface so
+callers (RAGIndexer, rag_service) require no changes.
+"""
+
+from __future__ import annotations
 
 import asyncio
 import os
@@ -7,7 +15,6 @@ from pathlib import Path
 from typing import Literal, Sequence
 
 from .milvus_vector_store import MilvusVectorStore
-from .postgres_metadata_store import PostgresMetadataStore
 from .types import NodeKind, RetrievalMatch, StoredNode
 
 ParagraphSearchMode = Literal["averaged", "full", "both"]
@@ -28,14 +35,8 @@ def _load_dotenv(path: str | Path = ".env") -> dict[str, str]:
     return env_vars
 
 
-def _vector_to_list(vector: Sequence[float]) -> list[float]:
-    if hasattr(vector, "tolist"):
-        return [float(x) for x in vector.tolist()]
-    return [float(x) for x in vector]
-
-
 class MilvusPostgresNodeStore:
-    """Vector storage in Milvus, metadata in PostgreSQL."""
+    """Vector + metadata storage entirely in Milvus (no PostgreSQL dependency)."""
 
     def __init__(
         self,
@@ -46,7 +47,6 @@ class MilvusPostgresNodeStore:
         milvus_uri: str | None = None,
         milvus_token: str | None = None,
         milvus_db: str | None = None,
-        pg_dsn: str | None = None,
         index_type: str = "HNSW",
         metric: str = "COSINE",
         search_nprobe: int = 16,
@@ -66,17 +66,9 @@ class MilvusPostgresNodeStore:
         self._milvus_uri = milvus_uri or self._get_env("MILVUS_URI")
         self._milvus_token = milvus_token or self._get_env("MILVUS_TOKEN")
         self._milvus_db = milvus_db or self._get_env("MILVUS_DB") or "default"
-        self._pg_dsn = (
-            pg_dsn
-            or self._get_env("PG_DSN")
-            or self._get_env("POSTGRES_DSN")
-            or self._get_env("DATABASE_URL")
-        )
 
         if not self._milvus_uri:
             raise ValueError("MILVUS_URI is required")
-        if not self._pg_dsn:
-            raise ValueError("PG_DSN/POSTGRES_DSN/DATABASE_URL is required")
 
         self._executor = ThreadPoolExecutor(max_workers=1)
 
@@ -91,80 +83,49 @@ class MilvusPostgresNodeStore:
             search_nprobe=self._search_nprobe,
             search_ef=self._search_ef,
             image_collection=self._image_collection_name,
-            create_para_full=False,
+            create_para_full=True,
             create_image=False,
-        )
-        self._metadata_store = PostgresMetadataStore(
-            pg_dsn=self._pg_dsn,
-            table_prefix=table_prefix,
         )
 
     def __del__(self) -> None:
         if hasattr(self, "_executor"):
             self._executor.shutdown(wait=False)
-        try:
-            if hasattr(self, "_metadata_store"):
-                self._metadata_store.close()
-        except Exception:
-            pass
 
     def _get_env(self, key: str) -> str | None:
         return os.getenv(key) or self._dotenv.get(key)
 
+    # ------------------------------------------------------------------
+    # Write path
+    # ------------------------------------------------------------------
+
     def _sync_upsert_nodes(self, nodes: Sequence[StoredNode]) -> None:
         if not nodes:
             return
-        self._metadata_store.upsert_nodes(nodes)
+        # All metadata + vectors go into the main collection
+        self._vector_store.upsert_nodes(self._vector_store.collection, nodes)
 
-        main_data = [
-            {
-                "node_id": node.node_id,
-                "kind": node.kind.value,
-                "embedding": _vector_to_list(node.embedding),
-            }
-            for node in nodes
-        ]
-        self._vector_store.upsert_vectors(self._vector_store.collection, main_data)
-
-        para_nodes = [
-            node
-            for node in nodes
-            if node.kind == NodeKind.PARAGRAPH and "full_embedding" in node.metadata
-        ]
-        if para_nodes:
-            if self._vector_store.para_full_collection is None:
-                self._vector_store.ensure_para_full_collection()
-
-            para_data = []
-            for node in para_nodes:
-                full_emb_hex = node.metadata["full_embedding"]
-                full_emb = bytes.fromhex(full_emb_hex)
-                full_emb_values = _vector_to_list(
-                    _bytes_to_float_list(full_emb)
-                )
-                para_data.append(
-                    {
-                        "node_id": node.node_id,
-                        "kind": node.kind.value,
-                        "embedding": full_emb_values,
-                    }
-                )
-            self._vector_store.upsert_vectors(
-                self._vector_store.para_full_collection, para_data
-            )
+        # Paragraph full-embedding collection (if any)
+        self._vector_store.upsert_para_full_vectors(nodes)
 
     async def upsert_nodes(self, nodes: Sequence[StoredNode]) -> None:
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(self._executor, self._sync_upsert_nodes, nodes)
 
-    def _fetch_rows(self, node_ids: Sequence[str]) -> dict[str, dict]:
-        return self._metadata_store.fetch_rows(node_ids)
+    # ------------------------------------------------------------------
+    # Read path — single node
+    # ------------------------------------------------------------------
 
-    def _fetch_embedding(self, node_id: str) -> list[float]:
-        return self._vector_store.fetch_embedding(node_id)
+    def _row_to_node(self, row: dict) -> StoredNode:
+        # If the row has an "embedding" key (from query), use it; otherwise
+        # fetch it separately or default to a zero vector.
+        embedding = row.get("embedding")
+        if embedding is not None:
+            if hasattr(embedding, "tolist"):
+                embedding = embedding.tolist()
+            vector = [float(x) for x in embedding]
+        else:
+            vector = [0.0] * self._dimensions
 
-    def _row_to_node(self, row: dict, embedding: list[float] | None = None) -> StoredNode:
-        vector = embedding if embedding is not None else [0.0] * self._dimensions
         return StoredNode(
             node_id=row["node_id"],
             parent_id=row.get("parent_id"),
@@ -178,13 +139,16 @@ class MilvusPostgresNodeStore:
 
     async def get_node(self, node_id: str) -> StoredNode:
         loop = asyncio.get_event_loop()
-        rows = await loop.run_in_executor(self._executor, self._fetch_rows, [node_id])
-        if node_id not in rows:
-            raise KeyError(node_id)
-        embedding = await loop.run_in_executor(
-            self._executor, self._fetch_embedding, node_id
+        row = await loop.run_in_executor(
+            self._executor, self._vector_store.fetch_node, node_id
         )
-        return self._row_to_node(rows[node_id], embedding)
+        if row is None:
+            raise KeyError(node_id)
+        return self._row_to_node(row)
+
+    # ------------------------------------------------------------------
+    # Search
+    # ------------------------------------------------------------------
 
     def _sync_search_collection(
         self,
@@ -195,7 +159,6 @@ class MilvusPostgresNodeStore:
     ) -> list[tuple[str, float]]:
         if collection is None:
             return []
-
         return self._vector_store.search(collection, query_vector, k, kinds)
 
     async def search(
@@ -234,7 +197,9 @@ class MilvusPostgresNodeStore:
             return []
 
         node_ids = [hit[0] for hit in all_hits]
-        rows = await loop.run_in_executor(self._executor, self._fetch_rows, node_ids)
+        rows = await loop.run_in_executor(
+            self._executor, self._vector_store.fetch_nodes, node_ids
+        )
 
         matches: list[RetrievalMatch] = []
         seen: set[str] = set()
@@ -272,7 +237,9 @@ class MilvusPostgresNodeStore:
             return []
 
         node_ids = [hit[0] for hit in hits]
-        rows = await loop.run_in_executor(self._executor, self._fetch_rows, node_ids)
+        rows = await loop.run_in_executor(
+            self._executor, self._vector_store.fetch_nodes, node_ids
+        )
         matches: list[RetrievalMatch] = []
         for node_id, score in hits:
             row = rows.get(node_id)
@@ -281,6 +248,10 @@ class MilvusPostgresNodeStore:
             matches.append(RetrievalMatch(node=self._row_to_node(row), score=score))
         matches.sort(key=lambda item: item.score, reverse=True)
         return matches[:k]
+
+    # ------------------------------------------------------------------
+    # Context (parent/child traversal)
+    # ------------------------------------------------------------------
 
     async def get_context(
         self,
@@ -340,6 +311,10 @@ class MilvusPostgresNodeStore:
                 seen=seen,
             )
 
+    # ------------------------------------------------------------------
+    # Introspection
+    # ------------------------------------------------------------------
+
     def has_image_index(self) -> bool:
         return self._vector_store.image_collection is not None
 
@@ -348,13 +323,3 @@ class MilvusPostgresNodeStore:
 
     def set_paragraph_search_mode(self, mode: ParagraphSearchMode) -> None:
         self._paragraph_search_mode = mode
-
-
-def _bytes_to_float_list(data: bytes) -> list[float]:
-    import struct
-
-    if not data:
-        return []
-
-    count = len(data) // 4
-    return list(struct.unpack("<" + "f" * count, data))

@@ -45,7 +45,7 @@ def _init_sync() -> None:
         datastore=_datastore,
         paragraph_embedding_mode=JINA_PARAGRAPH_MODE,
     )
-    print("[RAG] Embedder, Milvus, and PostgreSQL ready")
+    print("[RAG] Embedder, Milvus ready")
 
 
 async def init_rag() -> None:
