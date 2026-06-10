@@ -1,12 +1,10 @@
 import asyncio
-import hashlib
-import mimetypes
 import os
 import tempfile
 from pathlib import Path
 from typing import Any
 
-from .config import IMAGE_UPLOAD_DIR, PARSE_CONCURRENCY, SUPPORTED_EXTS
+from .config import PARSE_CONCURRENCY, SUPPORTED_EXTS
 from .document_parser.indexer import DocumentIndexer
 from .document_parser.parsers import parse_document_path
 from .document_parser.types import DocumentPayload, NodeKind
@@ -25,53 +23,6 @@ def _safe_filename(filename: str) -> str:
     return name or "upload"
 
 
-def _resolve_image_output_dir() -> str:
-    output_dir = os.path.abspath(IMAGE_UPLOAD_DIR)
-    os.makedirs(output_dir, exist_ok=True)
-    return output_dir
-
-
-def save_image_uploads(
-    images: list[tuple[str, bytes, str | None]],
-    *,
-    note: str | None = None,
-) -> list[dict[str, Any]]:
-    if not images:
-        return []
-
-    output_dir = _resolve_image_output_dir()
-    assets: list[dict[str, Any]] = []
-    for filename, data, content_type in images:
-        safe_name = _safe_filename(filename)
-        base, ext = os.path.splitext(safe_name)
-        ext = ext.lower() or ".bin"
-        digest = hashlib.sha256(data).hexdigest()
-        stored_name = f"{base}-{digest[:12]}{ext}"
-        path = os.path.join(output_dir, stored_name)
-        with open(path, "wb") as handle:
-            handle.write(data)
-
-        mime_type = content_type or mimetypes.guess_type(filename)[0]
-        metadata = {
-            "source_type": "user_upload",
-            "stored_filename": stored_name,
-        }
-        if note:
-            metadata["note"] = note
-
-        assets.append(
-            {
-                "filename": filename or safe_name,
-                "mime_type": mime_type or "application/octet-stream",
-                "sha256": digest,
-                "size_bytes": len(data),
-                "path": path,
-                "metadata": metadata,
-            }
-        )
-    return assets
-
-
 def _documents_from_payload(payload: DocumentPayload) -> list[dict[str, Any]]:
     tree_indexer = DocumentIndexer()
     root = tree_indexer.build_tree(payload)
@@ -85,7 +36,7 @@ def _documents_from_payload(payload: DocumentPayload) -> list[dict[str, Any]]:
         metadata["node_title"] = node.title
         if node.parent_id is not None:
             metadata["parent_id"] = node.parent_id
-        docs.append({"text": node.text, "metadata": metadata, "assets": []})
+        docs.append({"text": node.text, "metadata": metadata})
     return docs
 
 
@@ -129,7 +80,7 @@ async def parse_and_index_upload(
     content_type: str | None,
     note: str | None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Parse document bytes, embed with Jina V4, and store in Milvus."""
+    """Parse document bytes, embed, and store in Milvus."""
     async with _SEMAPHORE:
         try:
             payload = await asyncio.to_thread(
@@ -144,7 +95,6 @@ async def parse_and_index_upload(
                     doc_metadata.setdefault("content_type", content_type)
                 if note:
                     doc_metadata.setdefault("note", note)
-                doc.setdefault("assets", [])
 
             indexing = {
                 "document_id": payload.document_id,

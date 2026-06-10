@@ -23,7 +23,6 @@ app = FastAPI(title="pptGenerationSkill", version="0.2.0", lifespan=lifespan)
 class ParsedDocument(BaseModel):
     text: str
     metadata: dict[str, Any]
-    assets: list[dict[str, Any]]
 
 
 class IndexingSummary(BaseModel):
@@ -36,21 +35,6 @@ class ParseResponse(BaseModel):
     content_type: str | None
     documents: list[ParsedDocument]
     indexing: list[IndexingSummary]
-
-
-_IMAGE_EXTS = {
-    ".png",
-    ".jpg",
-    ".jpeg",
-    ".webp",
-}
-
-
-def _is_image_upload(filename: str, content_type: str | None) -> bool:
-    if content_type and content_type.startswith("image/"):
-        return True
-    ext = os.path.splitext(filename)[1].lower()
-    return ext in _IMAGE_EXTS
 
 
 @app.get("/health")
@@ -79,8 +63,7 @@ async def parse_file(
             raise HTTPException(status_code=400, detail="missing filename")
 
         ext = os.path.splitext(file.filename)[1].lower()
-        is_image = _is_image_upload(file.filename, file.content_type)
-        if not is_image and ext not in SUPPORTED_EXTS:
+        if ext not in SUPPORTED_EXTS:
             raise HTTPException(
                 status_code=415,
                 detail=f"unsupported file extension: {ext}",
@@ -99,18 +82,17 @@ async def parse_file(
 
         response_filename = file.filename
         response_content_type = file.content_type
-        if not is_image:
-            try:
-                file_documents, summary = await parse_and_index_upload(
-                    data=data,
-                    filename=file.filename,
-                    content_type=file.content_type,
-                    note=note,
-                )
-            except ParseError as exc:
-                raise HTTPException(status_code=500, detail=str(exc)) from exc
-            all_documents.extend(file_documents)
-            indexing_summaries.append(IndexingSummary(**summary))
+        try:
+            file_documents, summary = await parse_and_index_upload(
+                data=data,
+                filename=file.filename,
+                content_type=file.content_type,
+                note=note,
+            )
+        except ParseError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        all_documents.extend(file_documents)
+        indexing_summaries.append(IndexingSummary(**summary))
 
     if text_value.strip():
         data = text_value.encode("utf-8")

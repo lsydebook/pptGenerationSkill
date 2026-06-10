@@ -1,4 +1,4 @@
-"""Jina V4 Embedding Model - Local inference with GPU support."""
+"""Text Embedding Model - Local inference with GPU support."""
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
@@ -31,20 +31,20 @@ def _normalize(vectors: np.ndarray) -> np.ndarray:
 def _detect_device() -> Any:
     """Auto-detect best available device (CUDA > MPS > CPU)."""
     if torch.cuda.is_available():
-        print(f"[Jina V4] Using CUDA device: {torch.cuda.get_device_name(0)}")
+        print(f"[Embedder] Using CUDA device: {torch.cuda.get_device_name(0)}")
         return torch.device("cuda")
 
     has_mps = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
     if has_mps:
-        print("[Jina V4] Using Metal Performance Shaders (MPS) device")
+        print("[Embedder] Using Metal Performance Shaders (MPS) device")
         return torch.device("mps")
 
-    print("[Jina V4] Using CPU device (slower, no GPU detected)")
+    print("[Embedder] Using CPU device (slower, no GPU detected)")
     return torch.device("cpu")
 
 
-class JinaV4Embedder:
-    """Wrapper around jinaai/jina-embeddings-v4 with local inference.
+class Embedder:
+    """Wrapper around text embedding models with local inference.
 
     Features:
     - Text embedding with Matryoshka dimensions (128, 256, 512, 1024, 2048)
@@ -62,7 +62,7 @@ class JinaV4Embedder:
         truncate_dim: int = 1024,
         device: Any | None = None,
     ) -> None:
-        """Initialize Jina V4 embedding model.
+        """Initialize embedding model.
 
         Args:
             model_name: HuggingFace model identifier
@@ -116,7 +116,7 @@ class JinaV4Embedder:
         local_path = Path(self._model_name)
         local_only = local_path.is_dir() and (local_path / "config.json").exists()
         source = str(local_path.resolve()) if local_only else self._model_name
-        print(f"[Jina V4] Loading model: {source} (local_only={local_only})...")
+        print(f"[Embedder] Loading model: {source} (local_only={local_only})...")
         model = AutoModel.from_pretrained(
             source,
             trust_remote_code=True,
@@ -125,7 +125,7 @@ class JinaV4Embedder:
         model = model.to(self._device, dtype=self._dtype)
         model.eval().requires_grad_(False)
         self._model = model
-        print(f"[Jina V4] Model loaded successfully")
+        print(f"[Embedder] Model loaded successfully")
 
     @property
     def dimension(self) -> int:
@@ -150,9 +150,9 @@ class JinaV4Embedder:
         # Ensure all inputs are strings
         str_texts = [str(t) for t in texts]
 
-        print(f"[Jina V4] Encoding {len(str_texts)} texts (task={self._task}, dim={self._truncate_dim})")
+        print(f"[Embedder] Encoding {len(str_texts)} texts (task={self._task}, dim={self._truncate_dim})")
 
-        # Run inference with JinaV4's encode_text method
+        # Run inference with model's encode_text method
         with torch.no_grad():
             embeddings = self._model.encode_text(
                 texts=str_texts,
@@ -189,68 +189,3 @@ class JinaV4Embedder:
     async def embed(self, texts: Sequence[str]) -> np.ndarray:
         """Alias for embed_text for compatibility."""
         return await self.embed_text(texts)
-
-    def _sync_encode_images(self, image_bytes_list: Sequence[bytes]) -> np.ndarray:
-        """Synchronous image encoding.
-
-        Args:
-            image_bytes_list: List of image data as bytes (PNG/JPG/WebP)
-
-        Returns:
-            Array of shape (len(images), truncate_dim) with float32 dtype
-        """
-        self._ensure_model()
-        assert self._model is not None
-
-        if not image_bytes_list:
-            return np.zeros((0, self._truncate_dim), dtype=np.float32)
-
-        # Convert bytes to PIL Images
-        from io import BytesIO
-        from PIL import Image
-
-        images = []
-        for img_bytes in image_bytes_list:
-            try:
-                img = Image.open(BytesIO(img_bytes)).convert("RGB")
-                images.append(img)
-            except Exception as e:
-                print(f"[Jina V4] Failed to load image: {e}")
-                continue
-
-        if not images:
-            return np.zeros((0, self._truncate_dim), dtype=np.float32)
-
-        print(f"[Jina V4] Encoding {len(images)} images (task={self._task}, dim={self._truncate_dim})")
-
-        # Run inference
-        with torch.no_grad():
-            embeddings = self._model.encode_images(
-                images=images,
-                task=self._task,
-                truncate_dim=self._truncate_dim,
-            )
-
-        # Convert to numpy
-        if isinstance(embeddings, torch.Tensor):
-            arr = embeddings.detach().float().cpu().numpy()
-        elif isinstance(embeddings, list):
-            arr = torch.stack(embeddings).detach().float().cpu().numpy()
-        else:
-            arr = np.asarray(embeddings)
-
-        return arr.astype(np.float32, copy=False)
-
-    async def embed_images(self, image_bytes_list: Sequence[bytes]) -> np.ndarray:
-        """Encode images into embedding vectors (async).
-
-        Args:
-            image_bytes_list: List of image data as bytes
-
-        Returns:
-            Array of shape (len(images), dimension) with float32 dtype
-        """
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            self._executor, self._sync_encode_images, image_bytes_list
-        )

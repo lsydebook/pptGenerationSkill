@@ -10,7 +10,7 @@ import numpy as np
 
 from .datastore_milvus_pg import MilvusPostgresNodeStore
 from .indexer import DocumentIndexer as TreeIndexer
-from .jina_embedder import JinaV4Embedder
+from .embedder import Embedder
 from .parsers import text_to_payload
 from .types import DocumentPayload, NodeKind, StoredNode, TreeNode
 
@@ -31,11 +31,11 @@ def average_embeddings(child_vectors: Sequence[np.ndarray]) -> np.ndarray:
 
 
 class RAGIndexer:
-    """Parse hierarchical documents, embed with Jina V4, persist to Milvus."""
+    """Parse hierarchical documents, embed, persist to Milvus."""
 
     def __init__(
         self,
-        embedding_model: JinaV4Embedder,
+        embedding_model: Embedder,
         datastore: MilvusPostgresNodeStore,
         paragraph_embedding_mode: ParagraphEmbeddingMode = "averaged",
     ) -> None:
@@ -166,7 +166,7 @@ class RAGIndexer:
 async def index_and_store(
     text: str,
     *,
-    embedding_model: JinaV4Embedder,
+    embedding_model: Embedder,
     datastore: MilvusPostgresNodeStore,
     document_id: str | None = None,
     title: str = "Untitled",

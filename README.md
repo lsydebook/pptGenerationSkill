@@ -45,7 +45,7 @@ curl -X POST "http://localhost:8000/v1/parse" \
 
 ### Notes
 
-- Supported extensions: .pdf, .md, .markdown, .txt, and common images (.png, .jpg, .jpeg, .gif, .webp, .bmp, .tiff)
+- Supported extensions: .pdf, .md, .markdown, .txt
 - Each parsed document includes `text`, `metadata`, and `assets`.
 - Parsing uses Kohaku-style document segmentation (section → paragraph → sentence).
 - Image uploads are accepted but not parsed yet.

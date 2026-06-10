@@ -1,7 +1,7 @@
 from .datastore_milvus_pg import MilvusPostgresNodeStore
 from .indexer import DocumentIndexer
 from .indexing_pipeline import RAGIndexer, average_embeddings, index_and_store
-from .jina_embedder import JinaV4Embedder
+from .embedder import Embedder
 from .parsers import (
     dict_to_payload,
     markdown_to_payload,
@@ -23,7 +23,7 @@ from .types import (
 
 __all__ = [
     "DocumentIndexer",
-    "JinaV4Embedder",
+    "Embedder",
     "MilvusPostgresNodeStore",
     "NodeKind",
     "ParagraphPayload",

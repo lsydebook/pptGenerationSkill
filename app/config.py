@@ -26,23 +26,22 @@ _load_dotenv()
 
 PARSE_CONCURRENCY = int(os.getenv("PARSE_CONCURRENCY", "8"))
 MAX_FILE_SIZE_MB = int(os.getenv("MAX_FILE_SIZE_MB", "50"))
-IMAGE_UPLOAD_DIR = os.getenv("IMAGE_UPLOAD_DIR", "uploaded_images")
 SUPPORTED_EXTS = {".pdf", ".md", ".markdown", ".txt"}
 
 # RAG / indexing
 RAG_TABLE_PREFIX = os.getenv("RAG_TABLE_PREFIX", "rag_nodes")
-JINA_EMBEDDING_DIM = int(os.getenv("JINA_EMBEDDING_DIM", "1024"))
-JINA_EMBEDDING_TASK = os.getenv("JINA_EMBEDDING_TASK", "retrieval")
-JINA_PARAGRAPH_MODE = os.getenv("JINA_PARAGRAPH_MODE", "averaged")
+EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
+EMBEDDING_TASK = os.getenv("EMBEDDING_TASK", "retrieval")
+PARAGRAPH_MODE = os.getenv("PARAGRAPH_MODE", "averaged")
 MILVUS_INDEX_TYPE = os.getenv("MILVUS_INDEX_TYPE", "HNSW")
 MILVUS_METRIC = os.getenv("MILVUS_METRIC", "COSINE")
 
 
-def resolve_jina_model_path() -> str:
-    """Prefer local models/ directory, then JINA_MODEL_PATH, then HuggingFace id."""
+def resolve_model_path() -> str:
+    """Prefer local models/ directory, then MODEL_PATH, then HuggingFace id."""
     candidates: list[Path] = []
 
-    env_path = os.getenv("JINA_MODEL_PATH", "").strip()
+    env_path = os.getenv("MODEL_PATH", "").strip()
     if env_path:
         p = Path(env_path)
         candidates.append(p if p.is_absolute() else _PROJECT_ROOT / p)
@@ -58,4 +57,4 @@ def resolve_jina_model_path() -> str:
         if path.is_dir() and (path / "config.json").exists():
             return str(path.resolve())
 
-    return os.getenv("JINA_MODEL_NAME", "jinaai/jina-embeddings-v4")
+    return os.getenv("MODEL_NAME", "jinaai/jina-embeddings-v4")
