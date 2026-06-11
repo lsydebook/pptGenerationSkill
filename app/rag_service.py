@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 
 from .config import (
+    DASHSCOPE_API_KEY,
+    EMBEDDING_BATCH_SIZE,
     EMBEDDING_DIM,
-    EMBEDDING_TASK,
+    EMBEDDING_MODEL,
     PARAGRAPH_MODE,
     MILVUS_INDEX_TYPE,
     MILVUS_METRIC,
     RAG_TABLE_PREFIX,
-    resolve_model_path,
 )
 from .document_parser.datastore_milvus_pg import MilvusPostgresNodeStore
 from .document_parser.indexing_pipeline import RAGIndexer
@@ -25,13 +26,13 @@ _indexer: RAGIndexer | None = None
 def _init_sync() -> None:
     global _embedder, _datastore, _indexer
 
-    model_path = resolve_model_path()
-    print(f"[RAG] Loading embedding model from: {model_path}")
+    print(f"[RAG] Using DashScope embedding model: {EMBEDDING_MODEL}")
 
     _embedder = Embedder(
-        model_name=model_path,
-        task=EMBEDDING_TASK,
+        model_name=EMBEDDING_MODEL,
+        api_key=DASHSCOPE_API_KEY,
         truncate_dim=EMBEDDING_DIM,
+        batch_size=EMBEDDING_BATCH_SIZE,
     )
     _datastore = MilvusPostgresNodeStore(
         dimensions=_embedder.dimension,

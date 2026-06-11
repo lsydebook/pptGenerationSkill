@@ -1,13 +1,18 @@
-"""Text Embedding Model - Local inference with GPU support."""
+"""Text embedding via DashScope MultiModalEmbedding API."""
+
+from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from http import HTTPStatus
 from typing import Any, Protocol, Sequence
 
 import numpy as np
-import torch
-from transformers import AutoModel
+
+try:
+    import dashscope
+except ImportError:  # pragma: no cover
+    dashscope = None  # type: ignore[assignment]
 
 
 class EmbeddingModel(Protocol):
@@ -22,170 +27,129 @@ class EmbeddingModel(Protocol):
 
 
 def _normalize(vectors: np.ndarray) -> np.ndarray:
-    """Normalize vectors to unit length, handling zero vectors."""
     norms = np.linalg.norm(vectors, axis=1, keepdims=True)
-    norms[norms == 0] = 1.0  # Avoid division by zero
+    norms[norms == 0] = 1.0
     return vectors / norms
 
 
-def _detect_device() -> Any:
-    """Auto-detect best available device (CUDA > MPS > CPU)."""
-    if torch.cuda.is_available():
-        print(f"[Embedder] Using CUDA device: {torch.cuda.get_device_name(0)}")
-        return torch.device("cuda")
+def _extract_embeddings(response: Any) -> list[list[float]]:
+    if response.status_code != HTTPStatus.OK:
+        message = getattr(response, "message", str(response))
+        code = getattr(response, "code", "")
+        raise RuntimeError(
+            f"DashScope MultiModalEmbedding failed: status={response.status_code}, "
+            f"code={code}, message={message}"
+        )
 
-    has_mps = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
-    if has_mps:
-        print("[Embedder] Using Metal Performance Shaders (MPS) device")
-        return torch.device("mps")
+    output = response.output or {}
+    embeddings = output.get("embeddings")
+    if not embeddings:
+        raise RuntimeError("DashScope response missing output.embeddings")
 
-    print("[Embedder] Using CPU device (slower, no GPU detected)")
-    return torch.device("cpu")
+    sorted_items = sorted(embeddings, key=lambda item: item.get("index", 0))
+    return [item["embedding"] for item in sorted_items]
 
 
 class Embedder:
-    """Wrapper around text embedding models with local inference.
-
-    Features:
-    - Text embedding with Matryoshka dimensions (128, 256, 512, 1024, 2048)
-    - Batch processing for efficiency
-    - Lazy model loading (first-use initialization)
-    - GPU acceleration with FP16 when available
-    - Async interface for integration with async pipelines
-    """
+    """DashScope multimodal embedding wrapper with async batching."""
 
     def __init__(
         self,
-        model_name: str = "jinaai/jina-embeddings-v4",
+        model_name: str = "tongyi-embedding-vision-flash-2026-03-06",
         *,
-        task: str = "retrieval",
-        truncate_dim: int = 1024,
-        device: Any | None = None,
+        api_key: str | None = None,
+        truncate_dim: int | None = None,
+        batch_size: int = 16,
+        normalize: bool = True,
     ) -> None:
-        """Initialize embedding model.
-
-        Args:
-            model_name: HuggingFace model identifier
-            task: Task mode - "retrieval", "text-matching", or "code"
-            truncate_dim: Matryoshka dimension (128, 256, 512, 1024, 2048)
-            device: Target device (auto-detected if None)
-
-        Raises:
-            ValueError: If truncate_dim is not a valid Matryoshka dimension
-        """
-        # Validate truncate_dim
-        valid_dims = [128, 256, 512, 1024, 2048]
-        if truncate_dim not in valid_dims:
-            raise ValueError(
-                f"truncate_dim must be one of {valid_dims}, got {truncate_dim}"
+        if dashscope is None:
+            raise ImportError(
+                "dashscope is required for embedding. Install with: pip install dashscope"
             )
 
-        if task not in {"retrieval", "text-matching", "code"}:
-            raise ValueError(
-                f"task must be 'retrieval', 'text-matching', or 'code', got {task}"
-            )
+        if not api_key:
+            raise ValueError("DASHSCOPE_API_KEY is required for DashScope embeddings")
 
-        resolved_device = _detect_device() if device is None else torch.device(device)
+        dashscope.api_key = api_key
 
         self._model_name = model_name
-        self._task = task
-        self._truncate_dim = truncate_dim
-        self._device = resolved_device
-
-        # Use FP16 on GPU for 2x speedup
-        self._dtype = (
-            torch.float16 if resolved_device.type in {"cuda", "mps"} else torch.float32
-        )
-
-        # Lazy initialization - model loaded on first use
-        self._model: Any | None = None
-
-        # Single-worker executor for thread-safe GPU operations
+        self._batch_size = max(1, batch_size)
+        self._normalize = normalize
+        self._dimension = truncate_dim or 768
         self._executor = ThreadPoolExecutor(max_workers=1)
 
     def __del__(self) -> None:
-        """Cleanup executor on deletion."""
         if hasattr(self, "_executor"):
             self._executor.shutdown(wait=False)
 
-    def _ensure_model(self) -> None:
-        """Lazy-load the model on first use."""
-        if self._model is not None:
-            return
-
-        local_path = Path(self._model_name)
-        local_only = local_path.is_dir() and (local_path / "config.json").exists()
-        source = str(local_path.resolve()) if local_only else self._model_name
-        print(f"[Embedder] Loading model: {source} (local_only={local_only})...")
-        model = AutoModel.from_pretrained(
-            source,
-            trust_remote_code=True,
-            local_files_only=local_only,
-        )
-        model = model.to(self._device, dtype=self._dtype)
-        model.eval().requires_grad_(False)
-        self._model = model
-        print(f"[Embedder] Model loaded successfully")
-
     @property
     def dimension(self) -> int:
-        """Return the configured Matryoshka dimension."""
-        return self._truncate_dim
+        return self._dimension
 
-    def _sync_encode_text(self, texts: Sequence[str]) -> np.ndarray:
-        """Synchronous text encoding (called via executor).
-
-        Args:
-            texts: List of text strings to encode
-
-        Returns:
-            Array of shape (len(texts), truncate_dim) with float32 dtype
-        """
-        self._ensure_model()
-        assert self._model is not None
-
+    def _sync_embed_batch(self, texts: Sequence[str]) -> np.ndarray:
         if not texts:
-            return np.zeros((0, self._truncate_dim), dtype=np.float32)
+            return np.zeros((0, self._dimension), dtype=np.float32)
 
-        # Ensure all inputs are strings
-        str_texts = [str(t) for t in texts]
+        str_texts = [str(text) for text in texts]
+        print(
+            f"[Embedder] Encoding {len(str_texts)} texts "
+            f"(model={self._model_name}, dim={self._dimension})"
+        )
 
-        print(f"[Embedder] Encoding {len(str_texts)} texts (task={self._task}, dim={self._truncate_dim})")
+        response = dashscope.MultiModalEmbedding.call(
+            model=self._model_name,
+            input=[{"text": text} for text in str_texts],
+        )
+        vectors = np.asarray(_extract_embeddings(response), dtype=np.float32)
 
-        # Run inference with model's encode_text method
-        with torch.no_grad():
-            embeddings = self._model.encode_text(
-                texts=str_texts,
-                task=self._task,
-                prompt_name="query",
-                truncate_dim=self._truncate_dim,
-                max_length=8192,
+        if vectors.ndim != 2:
+            raise RuntimeError(f"Unexpected embedding shape: {vectors.shape}")
+        if vectors.shape[0] != len(str_texts):
+            raise RuntimeError(
+                f"Embedding count mismatch: expected {len(str_texts)}, got {vectors.shape[0]}"
             )
+        if vectors.shape[1] != self._dimension:
+            self._dimension = int(vectors.shape[1])
+            print(f"[Embedder] Detected embedding dimension: {self._dimension}")
 
-        # Convert to numpy
-        if isinstance(embeddings, torch.Tensor):
-            arr = embeddings.detach().float().cpu().numpy()
-        elif isinstance(embeddings, list):
-            arr = torch.stack(embeddings).detach().float().cpu().numpy()
-        else:
-            arr = np.asarray(embeddings)
+        if self._normalize:
+            vectors = _normalize(vectors)
+        return vectors.astype(np.float32, copy=False)
 
-        return arr.astype(np.float32, copy=False)
+    async def _embed_batch(self, texts: Sequence[str]) -> np.ndarray:
+        if hasattr(dashscope, "AioMultiModalEmbedding"):
+            if not texts:
+                return np.zeros((0, self._dimension), dtype=np.float32)
+
+            str_texts = [str(text) for text in texts]
+            print(
+                f"[Embedder] Encoding {len(str_texts)} texts "
+                f"(model={self._model_name}, dim={self._dimension})"
+            )
+            response = await dashscope.AioMultiModalEmbedding.call(
+                model=self._model_name,
+                input=[{"text": text} for text in str_texts],
+            )
+            vectors = np.asarray(_extract_embeddings(response), dtype=np.float32)
+            if vectors.shape[1] != self._dimension:
+                self._dimension = int(vectors.shape[1])
+            if self._normalize:
+                vectors = _normalize(vectors)
+            return vectors.astype(np.float32, copy=False)
+
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(self._executor, self._sync_embed_batch, texts)
 
     async def embed_text(self, texts: Sequence[str]) -> np.ndarray:
-        """Encode texts into embedding vectors (async).
+        if not texts:
+            return np.zeros((0, self._dimension), dtype=np.float32)
 
-        Uses single-worker executor to ensure thread safety for GPU operations.
-
-        Args:
-            texts: List of text strings to encode
-
-        Returns:
-            Array of shape (len(texts), dimension) with float32 dtype
-        """
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(self._executor, self._sync_encode_text, texts)
+        batches: list[np.ndarray] = []
+        text_list = list(texts)
+        for start in range(0, len(text_list), self._batch_size):
+            batch = text_list[start : start + self._batch_size]
+            batches.append(await self._embed_batch(batch))
+        return np.vstack(batches)
 
     async def embed(self, texts: Sequence[str]) -> np.ndarray:
-        """Alias for embed_text for compatibility."""
         return await self.embed_text(texts)

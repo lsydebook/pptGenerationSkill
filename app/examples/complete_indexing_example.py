@@ -3,13 +3,14 @@
 import asyncio
 
 from app.config import (
+    DASHSCOPE_API_KEY,
+    EMBEDDING_BATCH_SIZE,
     EMBEDDING_DIM,
-    EMBEDDING_TASK,
+    EMBEDDING_MODEL,
     PARAGRAPH_MODE,
     MILVUS_INDEX_TYPE,
     MILVUS_METRIC,
     RAG_TABLE_PREFIX,
-    resolve_model_path,
 )
 from app.document_parser import (
     Embedder,
@@ -21,9 +22,10 @@ from app.document_parser import (
 
 async def main() -> None:
     embedder = Embedder(
-        model_name=resolve_model_path(),
-        task=EMBEDDING_TASK,
+        model_name=EMBEDDING_MODEL,
+        api_key=DASHSCOPE_API_KEY,
         truncate_dim=EMBEDDING_DIM,
+        batch_size=EMBEDDING_BATCH_SIZE,
     )
     datastore = MilvusPostgresNodeStore(
         dimensions=embedder.dimension,

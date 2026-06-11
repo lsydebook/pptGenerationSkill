@@ -89,6 +89,8 @@ class MilvusPostgresNodeStore:
     def __del__(self) -> None:
         if hasattr(self, "_executor"):
             self._executor.shutdown(wait=False)
+        if hasattr(self, "_vector_store"):
+            self._vector_store.close()
 
     def _get_env(self, key: str) -> str | None:
         return os.getenv(key) or self._dotenv.get(key)

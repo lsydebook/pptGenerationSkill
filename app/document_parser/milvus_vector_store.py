@@ -1,8 +1,25 @@
 """Milvus vector store helpers — stores both vectors and node metadata."""
 
+from __future__ import annotations
+
 from typing import Any, Sequence
 
+from pymilvus import CollectionSchema, DataType, FieldSchema, MilvusClient
+from pymilvus.milvus_client import IndexParams
+
 from .types import NodeKind, StoredNode
+
+OUTPUT_FIELDS = [
+    "node_id",
+    "parent_id",
+    "kind",
+    "title",
+    "text",
+    "metadata",
+    "child_ids",
+    "created_at",
+    "embedding",
+]
 
 
 def _vector_to_list(vector: Sequence[float]) -> list[float]:
@@ -12,19 +29,7 @@ def _vector_to_list(vector: Sequence[float]) -> list[float]:
 
 
 class MilvusVectorStore:
-    """Manages Milvus collections for vector + metadata storage.
-
-    Each node stores:
-      - node_id (VARCHAR, primary key)
-      - parent_id (VARCHAR, nullable)
-      - kind (VARCHAR)
-      - title (VARCHAR)
-      - text (VARCHAR)
-      - metadata (JSON)
-      - child_ids (JSON)
-      - created_at (INT64, Unix timestamp)
-      - embedding (FLOAT_VECTOR)
-    """
+    """Manages Milvus collections for vector + metadata storage via MilvusClient."""
 
     def __init__(
         self,
@@ -48,53 +53,56 @@ class MilvusVectorStore:
         self._search_nprobe = search_nprobe
         self._search_ef = search_ef
 
-        self._milvus_alias = f"milvus_{id(self)}"
-        self._connect(milvus_uri, milvus_token, milvus_db)
+        client_kwargs: dict[str, Any] = {"uri": milvus_uri}
+        if milvus_token:
+            client_kwargs["token"] = milvus_token
+        if milvus_db:
+            client_kwargs["db_name"] = milvus_db
+        self._client = MilvusClient(**client_kwargs)
 
+        self._table_prefix = table_prefix
         self._collection_name = f"{table_prefix}_vec"
-        self._para_full_collection_name = f"{table_prefix}_para_full_vec"
-        self._image_collection_name = image_collection or f"{table_prefix}_images_vec"
+        self._para_full_name = f"{table_prefix}_para_full_vec"
+        self._image_name = image_collection or f"{table_prefix}_images_vec"
 
-        self.collection = self._ensure_collection(self._collection_name)
-        self.para_full_collection = self._ensure_collection(
-            self._para_full_collection_name, create_if_missing=create_para_full
+        self._ensure_collection(self._collection_name)
+        self._para_full_collection_name = self._ensure_collection(
+            self._para_full_name,
+            create_if_missing=create_para_full,
         )
-        self.image_collection = self._ensure_collection(
-            self._image_collection_name, create_if_missing=create_image
+        self._image_collection_name = self._ensure_collection(
+            self._image_name,
+            create_if_missing=create_image,
         )
 
-    def _connect(self, uri: str, token: str | None, db_name: str) -> None:
-        from pymilvus import connections
+    @property
+    def client(self) -> MilvusClient:
+        return self._client
 
-        kwargs: dict[str, object] = {"alias": self._milvus_alias, "uri": uri}
-        if token:
-            kwargs["token"] = token
-        if db_name:
-            kwargs["db_name"] = db_name
-        connections.connect(**kwargs)
+    @property
+    def collection(self) -> str:
+        return self._collection_name
+
+    @property
+    def para_full_collection(self) -> str | None:
+        return self._para_full_collection_name
+
+    @property
+    def image_collection(self) -> str | None:
+        return self._image_collection_name
+
+    def close(self) -> None:
+        self._client.close()
 
     def ensure_para_full_collection(self) -> None:
-        if self.para_full_collection is None:
-            self.para_full_collection = self._ensure_collection(
-                self._para_full_collection_name
-            )
+        if self._para_full_collection_name is None:
+            self._para_full_collection_name = self._ensure_collection(self._para_full_name)
 
     def ensure_image_collection(self) -> None:
-        if self.image_collection is None:
-            self.image_collection = self._ensure_collection(self._image_collection_name)
+        if self._image_collection_name is None:
+            self._image_collection_name = self._ensure_collection(self._image_name)
 
-    def _ensure_collection(self, name: str, *, create_if_missing: bool = True):
-        from pymilvus import Collection, CollectionSchema, DataType, FieldSchema, utility
-
-        if utility.has_collection(name, using=self._milvus_alias):
-            collection = Collection(name, using=self._milvus_alias)
-            collection.load()
-            return collection
-
-        if not create_if_missing:
-            return None
-
-        # Extended schema — stores all node metadata inline
+    def _build_schema(self) -> CollectionSchema:
         fields = [
             FieldSchema(
                 name="node_id",
@@ -103,70 +111,62 @@ class MilvusVectorStore:
                 is_primary=True,
                 auto_id=False,
             ),
-            FieldSchema(
-                name="parent_id",
-                dtype=DataType.VARCHAR,
-                max_length=512,
-            ),
-            FieldSchema(
-                name="kind",
-                dtype=DataType.VARCHAR,
-                max_length=32,
-            ),
-            FieldSchema(
-                name="title",
-                dtype=DataType.VARCHAR,
-                max_length=4096,
-            ),
-            FieldSchema(
-                name="text",
-                dtype=DataType.VARCHAR,
-                max_length=65535,
-            ),
-            FieldSchema(
-                name="metadata",
-                dtype=DataType.JSON,
-            ),
-            FieldSchema(
-                name="child_ids",
-                dtype=DataType.JSON,
-            ),
-            FieldSchema(
-                name="created_at",
-                dtype=DataType.INT64,
-            ),
+            FieldSchema(name="parent_id", dtype=DataType.VARCHAR, max_length=512),
+            FieldSchema(name="kind", dtype=DataType.VARCHAR, max_length=32),
+            FieldSchema(name="title", dtype=DataType.VARCHAR, max_length=4096),
+            FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=65535),
+            FieldSchema(name="metadata", dtype=DataType.JSON),
+            FieldSchema(name="child_ids", dtype=DataType.JSON),
+            FieldSchema(name="created_at", dtype=DataType.INT64),
             FieldSchema(
                 name="embedding",
                 dtype=DataType.FLOAT_VECTOR,
                 dim=self._dimensions,
             ),
         ]
-        schema = CollectionSchema(fields, description="document nodes with vectors and metadata")
-        collection = Collection(name, schema, using=self._milvus_alias)
+        return CollectionSchema(
+            fields,
+            description="document nodes with vectors and metadata",
+        )
 
-        index_params = self._build_index_params()
-        collection.create_index("embedding", index_params)
-        collection.load()
-        return collection
-
-    def _build_index_params(self) -> dict[str, object]:
+    def _build_index_params(self) -> IndexParams:
+        index_params = IndexParams()
         if self._index_type == "HNSW":
-            return {
-                "index_type": "HNSW",
-                "metric_type": self._metric,
-                "params": {"M": 16, "efConstruction": 200},
-            }
-        if self._index_type == "IVF_FLAT":
-            return {
-                "index_type": "IVF_FLAT",
-                "metric_type": self._metric,
-                "params": {"nlist": 1024},
-            }
-        return {
-            "index_type": "FLAT",
-            "metric_type": self._metric,
-            "params": {},
-        }
+            index_params.add_index(
+                field_name="embedding",
+                index_type="HNSW",
+                metric_type=self._metric,
+                params={"M": 16, "efConstruction": 200},
+            )
+        elif self._index_type == "IVF_FLAT":
+            index_params.add_index(
+                field_name="embedding",
+                index_type="IVF_FLAT",
+                metric_type=self._metric,
+                params={"nlist": 1024},
+            )
+        else:
+            index_params.add_index(
+                field_name="embedding",
+                index_type="FLAT",
+                metric_type=self._metric,
+            )
+        return index_params
+
+    def _ensure_collection(self, name: str, *, create_if_missing: bool = True) -> str | None:
+        if self._client.has_collection(name):
+            self._client.load_collection(name)
+            return name
+
+        if not create_if_missing:
+            return None
+
+        self._client.create_collection(
+            collection_name=name,
+            schema=self._build_schema(),
+            index_params=self._build_index_params(),
+        )
+        return name
 
     def _build_search_params(self) -> dict[str, object]:
         if self._index_type == "HNSW":
@@ -192,7 +192,6 @@ class MilvusVectorStore:
         date_end: int | None = None,
         ids: list[str] | None = None,
     ) -> str | None:
-        """Combine multiple filter clauses into one Milvus expression."""
         clauses: list[str] = []
 
         kinds_expr = self._expr_for_kinds(kinds)
@@ -227,12 +226,9 @@ class MilvusVectorStore:
         quoted = [f'"{value.replace("\"", "\\\"")}"' for value in ids]
         return f"node_id in [{', '.join(quoted)}]"
 
-    def upsert_nodes(self, collection, nodes: Sequence[StoredNode]) -> None:
-        """Upsert StoredNode records into a Milvus collection."""
-        if collection is None or not nodes:
-            return
-
-        data = [
+    @staticmethod
+    def _nodes_to_rows(nodes: Sequence[StoredNode]) -> list[dict[str, Any]]:
+        return [
             {
                 "node_id": node.node_id,
                 "parent_id": node.parent_id or "",
@@ -247,19 +243,16 @@ class MilvusVectorStore:
             for node in nodes
         ]
 
-        if hasattr(collection, "upsert"):
-            collection.upsert(data)
-        else:
-            ids = [d["node_id"] for d in data]
-            expr = self._expr_for_ids(ids)
-            if expr:
-                collection.delete(expr)
-            collection.insert(data)
-        collection.flush()
+    def upsert_nodes(self, collection_name: str | None, nodes: Sequence[StoredNode]) -> None:
+        if not collection_name or not nodes:
+            return
+        self._client.upsert(
+            collection_name=collection_name,
+            data=self._nodes_to_rows(nodes),
+        )
 
     def upsert_para_full_vectors(self, nodes: Sequence[StoredNode]) -> None:
-        """Upsert paragraph-level full embeddings into the para_full collection."""
-        if self.para_full_collection is None or not nodes:
+        if self._para_full_collection_name is None or not nodes:
             return
 
         para_nodes = [
@@ -268,11 +261,6 @@ class MilvusVectorStore:
             if node.kind == NodeKind.PARAGRAPH and "full_embedding" in node.metadata
         ]
         if not para_nodes:
-            return
-
-        if self.para_full_collection is None:
-            self.ensure_para_full_collection()
-        if self.para_full_collection is None:
             return
 
         data = []
@@ -293,47 +281,39 @@ class MilvusVectorStore:
                 }
             )
 
-        if hasattr(self.para_full_collection, "upsert"):
-            self.para_full_collection.upsert(data)
-        else:
-            ids = [d["node_id"] for d in data]
-            expr = self._expr_for_ids(ids)
-            if expr:
-                self.para_full_collection.delete(expr)
-            self.para_full_collection.insert(data)
-        self.para_full_collection.flush()
+        self._client.upsert(
+            collection_name=self._para_full_collection_name,
+            data=data,
+        )
 
     def fetch_node(self, node_id: str) -> dict | None:
-        """Fetch a single node's full record from the main collection."""
-        if self.collection is None:
-            return None
-
         expr = f'node_id == "{node_id.replace("\"", "\\\"")}"'
-        results = self.collection.query(
-            expr=expr,
-            output_fields=["node_id", "parent_id", "kind", "title", "text", "metadata", "child_ids", "created_at", "embedding"],
+        results = self._client.query(
+            collection_name=self._collection_name,
+            filter=expr,
+            output_fields=OUTPUT_FIELDS,
+            limit=1,
         )
         if not results:
             return None
         return self._row_to_dict(results[0])
 
     def fetch_nodes(self, node_ids: Sequence[str]) -> dict[str, dict]:
-        """Fetch multiple nodes by ID; returns {node_id: row_dict}."""
         if not node_ids:
             return {}
         expr = self._expr_for_ids(list(node_ids))
         if not expr:
             return {}
 
-        results = self.collection.query(
-            expr=expr,
-            output_fields=["node_id", "parent_id", "kind", "title", "text", "metadata", "child_ids", "created_at", "embedding"],
+        results = self._client.query(
+            collection_name=self._collection_name,
+            filter=expr,
+            output_fields=OUTPUT_FIELDS,
         )
         return {r["node_id"]: self._row_to_dict(r) for r in results}
 
     @staticmethod
     def _row_to_dict(row: dict) -> dict:
-        """Normalise a Milvus query result row to a flat dict."""
         return {
             "node_id": row.get("node_id", ""),
             "parent_id": row.get("parent_id") or None,
@@ -343,21 +323,33 @@ class MilvusVectorStore:
             "metadata": row.get("metadata", {}) or {},
             "child_ids": row.get("child_ids", []) or [],
             "created_at": row.get("created_at", 0) or 0,
+            "embedding": row.get("embedding"),
         }
 
     def fetch_embedding(self, node_id: str) -> list[float]:
-        if self.collection is None:
-            return [0.0] * self._dimensions
-
         expr = f'node_id == "{node_id.replace("\"", "\\\"")}"'
-        results = self.collection.query(expr=expr, output_fields=["embedding"])
+        results = self._client.query(
+            collection_name=self._collection_name,
+            filter=expr,
+            output_fields=["embedding"],
+            limit=1,
+        )
         if not results:
             return [0.0] * self._dimensions
         return [float(x) for x in results[0]["embedding"]]
 
+    @staticmethod
+    def _hit_node_id(hit: dict[str, Any]) -> str:
+        entity = hit.get("entity") or {}
+        return str(hit.get("id") or hit.get("node_id") or entity.get("node_id") or "")
+
+    @staticmethod
+    def _hit_distance(hit: dict[str, Any]) -> float:
+        return float(hit.get("distance", 0.0))
+
     def search(
         self,
-        collection,
+        collection_name: str | None,
         query_vector: Sequence[float],
         k: int,
         kinds: set[NodeKind] | None,
@@ -365,24 +357,32 @@ class MilvusVectorStore:
         date_start: int | None = None,
         date_end: int | None = None,
     ) -> list[tuple[str, float]]:
-        if collection is None:
+        if not collection_name:
             return []
 
-        expr = self._build_expr(kinds, date_start=date_start, date_end=date_end)
-        results = collection.search(
+        filter_expr = self._build_expr(
+            kinds,
+            date_start=date_start,
+            date_end=date_end,
+        )
+        results = self._client.search(
+            collection_name=collection_name,
             data=[_vector_to_list(query_vector)],
             anns_field="embedding",
-            param=self._build_search_params(),
+            search_params=self._build_search_params(),
             limit=k,
-            expr=expr,
+            filter=filter_expr or "",
             output_fields=["node_id", "kind"],
         )
         hits = results[0] if results else []
-        return [(hit.id, self._score_from_distance(hit.distance)) for hit in hits]
+        return [
+            (self._hit_node_id(hit), self._score_from_distance(self._hit_distance(hit)))
+            for hit in hits
+        ]
 
     def search_with_details(
         self,
-        collection,
+        collection_name: str | None,
         query_vector: Sequence[float],
         k: int,
         kinds: set[NodeKind] | None,
@@ -390,27 +390,29 @@ class MilvusVectorStore:
         date_start: int | None = None,
         date_end: int | None = None,
     ) -> list[dict]:
-        """Search and return full row dicts (including text/metadata)."""
-        if collection is None:
+        if not collection_name:
             return []
 
-        expr = self._build_expr(kinds, date_start=date_start, date_end=date_end)
-        results = collection.search(
+        filter_expr = self._build_expr(
+            kinds,
+            date_start=date_start,
+            date_end=date_end,
+        )
+        results = self._client.search(
+            collection_name=collection_name,
             data=[_vector_to_list(query_vector)],
             anns_field="embedding",
-            param=self._build_search_params(),
+            search_params=self._build_search_params(),
             limit=k,
-            expr=expr,
-            output_fields=[
-                "node_id", "parent_id", "kind", "title", "text",
-                "metadata", "child_ids", "created_at", "embedding",
-            ],
+            filter=filter_expr or "",
+            output_fields=OUTPUT_FIELDS,
         )
         hits = results[0] if results else []
-        out = []
+        out: list[dict] = []
         for hit in hits:
-            row = self._row_to_dict(hit.entity.to_dict() if hasattr(hit.entity, "to_dict") else {})
-            row["score"] = self._score_from_distance(hit.distance)
+            entity = hit.get("entity") or {}
+            row = self._row_to_dict({**entity, **hit})
+            row["score"] = self._score_from_distance(self._hit_distance(hit))
             out.append(row)
         return out
 

@@ -2,6 +2,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+import numpy as np
+
 
 class NodeKind(str, Enum):
     DOCUMENT = "document"
@@ -49,6 +51,7 @@ class TreeNode:
     metadata: dict[str, Any]
     parent_id: str | None = None
     children: list["TreeNode"] = field(default_factory=list)
+    embedding: np.ndarray | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass

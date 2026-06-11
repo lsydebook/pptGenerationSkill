@@ -30,31 +30,13 @@ SUPPORTED_EXTS = {".pdf", ".md", ".markdown", ".txt"}
 
 # RAG / indexing
 RAG_TABLE_PREFIX = os.getenv("RAG_TABLE_PREFIX", "rag_nodes")
-EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
-EMBEDDING_TASK = os.getenv("EMBEDDING_TASK", "retrieval")
+EMBEDDING_MODEL = os.getenv(
+    "EMBEDDING_MODEL",
+    "tongyi-embedding-vision-flash-2026-03-06",
+)
+EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "768"))
+EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "16"))
+DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "")
 PARAGRAPH_MODE = os.getenv("PARAGRAPH_MODE", "averaged")
 MILVUS_INDEX_TYPE = os.getenv("MILVUS_INDEX_TYPE", "HNSW")
 MILVUS_METRIC = os.getenv("MILVUS_METRIC", "COSINE")
-
-
-def resolve_model_path() -> str:
-    """Prefer local models/ directory, then MODEL_PATH, then HuggingFace id."""
-    candidates: list[Path] = []
-
-    env_path = os.getenv("MODEL_PATH", "").strip()
-    if env_path:
-        p = Path(env_path)
-        candidates.append(p if p.is_absolute() else _PROJECT_ROOT / p)
-
-    candidates.extend(
-        [
-            _PROJECT_ROOT / "models" / "jina-embeddings-v4",
-            _PROJECT_ROOT / "models" / "jinaai" / "jina-embeddings-v4",
-        ]
-    )
-
-    for path in candidates:
-        if path.is_dir() and (path / "config.json").exists():
-            return str(path.resolve())
-
-    return os.getenv("MODEL_NAME", "jinaai/jina-embeddings-v4")
