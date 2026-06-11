@@ -5,8 +5,8 @@ from typing import Any
 
 from pypdf import PdfReader
 
-from .text_utils import split_paragraphs, split_sentences
-from .types import DocumentPayload, ParagraphPayload, SectionPayload, SentencePayload
+from .document_types import DocumentPayload, ParagraphPayload, SectionPayload, SentencePayload
+from .text_splitter import split_paragraphs, split_sentences
 
 
 def pdf_to_document_payload(

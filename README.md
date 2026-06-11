@@ -14,6 +14,37 @@ Or with uvicorn directly:
 uv run uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
+## Project layout
+
+```
+app/
+  parsing/                      # 文件解析（PDF/Markdown/TXT，后续可扩 Word）
+    document_types.py           # 文档树数据结构
+    text_splitter.py            # 分段、分句（纯文本输入也走这里）
+    pdf_parser.py
+    document_payload_builder.py
+  llm/                          # 模型调用（向量化、后续 query 优化等）
+    dashscope_embedder.py
+  storage/                      # Milvus IO（建库、读写、检索）
+    milvus_vector_store.py
+    milvus_rag_node_store.py
+  rag_pipeline.py               # 主流水线：解析 → 向量化 → 入库
+  api/                          # HTTP 层
+    fastapi_app.py
+    http_schemas.py
+  config.py
+test/
+  inspect_milvus.py             # 查看 Milvus 全部入库数据
+main.py                         # 入口: uv run main.py
+```
+
+### Inspect Milvus data
+
+```bash
+uv run python -m test.inspect_milvus
+uv run python -m test.inspect_milvus --export milvus_dump.json
+```
+
 ### API
 
 Parse uploaded file and free-form text, each will be parsed independently if both are provided.

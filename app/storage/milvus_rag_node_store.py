@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Literal, Sequence
 
 from .milvus_vector_store import MilvusVectorStore
-from .types import NodeKind, RetrievalMatch, StoredNode
+from app.parsing.document_types import NodeKind, RetrievalMatch, StoredNode
 
 ParagraphSearchMode = Literal["averaged", "full", "both"]
 

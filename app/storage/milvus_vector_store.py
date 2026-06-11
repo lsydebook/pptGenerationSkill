@@ -7,7 +7,7 @@ from typing import Any, Sequence
 from pymilvus import CollectionSchema, DataType, FieldSchema, MilvusClient
 from pymilvus.milvus_client import IndexParams
 
-from .types import NodeKind, StoredNode
+from app.parsing.document_types import NodeKind, StoredNode
 
 OUTPUT_FIELDS = [
     "node_id",

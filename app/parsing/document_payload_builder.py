@@ -5,9 +5,9 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from .pdf_utils import pdf_to_document_payload
-from .text_utils import split_paragraphs, split_sentences
-from .types import DocumentPayload, ParagraphPayload, SectionPayload, SentencePayload
+from .document_types import DocumentPayload, ParagraphPayload, SectionPayload, SentencePayload
+from .pdf_parser import pdf_to_document_payload
+from .text_splitter import split_paragraphs, split_sentences
 
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
 MARKDOWN_EXTS = {".md", ".markdown"}
