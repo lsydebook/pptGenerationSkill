@@ -5,7 +5,13 @@
 ### Run
 
 ```bash
-uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+uv run main.py
+```
+
+Or with uvicorn directly:
+
+```bash
+uv run uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
 ### API
