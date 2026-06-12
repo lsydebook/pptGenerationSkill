@@ -7,7 +7,7 @@ from typing import Any, Sequence
 from pymilvus import CollectionSchema, DataType, FieldSchema, MilvusClient
 from pymilvus.milvus_client import IndexParams
 
-from app.parsing.document_types import NodeKind, StoredNode
+from src.parsing.document_types import NodeKind, StoredNode
 
 OUTPUT_FIELDS = [
     "node_id",
@@ -379,6 +379,32 @@ class MilvusVectorStore:
             (self._hit_node_id(hit), self._score_from_distance(self._hit_distance(hit)))
             for hit in hits
         ]
+
+    def fetch_all_searchable_nodes(
+        self,
+        *,
+        kinds: set[NodeKind] | None = None,
+        batch_size: int = 500,
+    ) -> list[dict]:
+        """Fetch node_id/kind/text for BM25 indexing."""
+        filter_expr = self._expr_for_kinds(kinds)
+        rows: list[dict] = []
+        offset = 0
+        while True:
+            results = self._client.query(
+                collection_name=self._collection_name,
+                filter=filter_expr or "",
+                output_fields=["node_id", "kind", "text"],
+                limit=batch_size,
+                offset=offset,
+            )
+            if not results:
+                break
+            rows.extend(self._row_to_dict(r) for r in results)
+            if len(results) < batch_size:
+                break
+            offset += batch_size
+        return rows
 
     def search_with_details(
         self,

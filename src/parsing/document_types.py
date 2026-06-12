@@ -71,3 +71,13 @@ class StoredNode:
 class RetrievalMatch:
     node: StoredNode
     score: float
+
+
+@dataclass
+class ContextSnippet:
+    node_id: str
+    document_title: str
+    text: str
+    metadata: dict[str, Any]
+    rank: int
+    score: float

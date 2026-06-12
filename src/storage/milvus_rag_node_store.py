@@ -10,28 +10,19 @@ from __future__ import annotations
 import asyncio
 import os
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from functools import partial
 from typing import Literal, Sequence
 
+import src.config.env_loader  # noqa: F401  # 加载 .env
+from src.config.logging_config import get_logger
+from src.parsing.document_types import NodeKind, RetrievalMatch, StoredNode
+from src.storage.bm25_index import BM25Index
+
 from .milvus_vector_store import MilvusVectorStore
-from app.parsing.document_types import NodeKind, RetrievalMatch, StoredNode
+
+logger = get_logger(__name__)
 
 ParagraphSearchMode = Literal["averaged", "full", "both"]
-
-
-def _load_dotenv(path: str | Path = ".env") -> dict[str, str]:
-    env_path = Path(path)
-    if not env_path.exists():
-        return {}
-
-    env_vars: dict[str, str] = {}
-    for line in env_path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        env_vars[key.strip()] = value.strip().strip("\"").strip("'")
-    return env_vars
 
 
 class MilvusPostgresNodeStore:
@@ -61,10 +52,9 @@ class MilvusPostgresNodeStore:
         self._search_ef = search_ef
         self._image_collection_name = image_collection
 
-        self._dotenv = _load_dotenv()
-        self._milvus_uri = milvus_uri or self._get_env("MILVUS_URI")
-        self._milvus_token = milvus_token or self._get_env("MILVUS_TOKEN")
-        self._milvus_db = milvus_db or self._get_env("MILVUS_DB") or "default"
+        self._milvus_uri = milvus_uri or os.getenv("MILVUS_URI")
+        self._milvus_token = milvus_token or os.getenv("MILVUS_TOKEN")
+        self._milvus_db = milvus_db or os.getenv("MILVUS_DB") or "default"
 
         if not self._milvus_uri:
             raise ValueError("MILVUS_URI is required")
@@ -85,15 +75,13 @@ class MilvusPostgresNodeStore:
             create_para_full=True,
             create_image=False,
         )
+        self._bm25_index = BM25Index()
 
     def __del__(self) -> None:
         if hasattr(self, "_executor"):
             self._executor.shutdown(wait=False)
         if hasattr(self, "_vector_store"):
             self._vector_store.close()
-
-    def _get_env(self, key: str) -> str | None:
-        return os.getenv(key) or self._dotenv.get(key)
 
     # ------------------------------------------------------------------
     # Write path
@@ -102,11 +90,22 @@ class MilvusPostgresNodeStore:
     def _sync_upsert_nodes(self, nodes: Sequence[StoredNode]) -> None:
         if not nodes:
             return
+        kind_counts: dict[str, int] = {}
+        for node in nodes:
+            key = node.kind.value
+            kind_counts[key] = kind_counts.get(key, 0) + 1
+        logger.info(
+            "milvus upsert_nodes count=%s kinds=%s collection=%s",
+            len(nodes),
+            kind_counts,
+            getattr(self._vector_store.collection, "name", self._table_prefix),
+        )
         # All metadata + vectors go into the main collection
         self._vector_store.upsert_nodes(self._vector_store.collection, nodes)
 
         # Paragraph full-embedding collection (if any)
         self._vector_store.upsert_para_full_vectors(nodes)
+        logger.info("milvus upsert_nodes done count=%s", len(nodes))
 
     async def upsert_nodes(self, nodes: Sequence[StoredNode]) -> None:
         loop = asyncio.get_event_loop()
@@ -184,26 +183,30 @@ class MilvusPostgresNodeStore:
         loop = asyncio.get_event_loop()
         main_hits = await loop.run_in_executor(
             self._executor,
-            self._sync_search_collection,
-            self._vector_store.collection,
-            query_vector,
-            k,
-            kinds,
-            date_start=date_start,
-            date_end=date_end,
+            partial(
+                self._sync_search_collection,
+                self._vector_store.collection,
+                query_vector,
+                k,
+                kinds,
+                date_start=date_start,
+                date_end=date_end,
+            ),
         )
 
         para_hits: list[tuple[str, float]] = []
         if mode in {"full", "both"} and self._vector_store.para_full_collection is not None:
             para_hits = await loop.run_in_executor(
                 self._executor,
-                self._sync_search_collection,
-                self._vector_store.para_full_collection,
-                query_vector,
-                k,
-                kinds,
-                date_start=date_start,
-                date_end=date_end,
+                partial(
+                    self._sync_search_collection,
+                    self._vector_store.para_full_collection,
+                    query_vector,
+                    k,
+                    kinds,
+                    date_start=date_start,
+                    date_end=date_end,
+                ),
             )
 
         all_hits = main_hits + para_hits
@@ -337,3 +340,102 @@ class MilvusPostgresNodeStore:
 
     def set_paragraph_search_mode(self, mode: ParagraphSearchMode) -> None:
         self._paragraph_search_mode = mode
+
+    # ------------------------------------------------------------------
+    # BM25 hybrid search
+    # ------------------------------------------------------------------
+
+    def has_bm25_index(self) -> bool:
+        return self._bm25_index.size > 0
+
+    def bm25_index_size(self) -> int:
+        return self._bm25_index.size
+
+    def _sync_rebuild_bm25_index(
+        self,
+        kinds: set[NodeKind] | None = None,
+    ) -> None:
+        searchable_kinds = kinds or {NodeKind.SENTENCE, NodeKind.PARAGRAPH}
+        rows = self._vector_store.fetch_all_searchable_nodes(kinds=searchable_kinds)
+        entries = [
+            (row["node_id"], row["text"], row["kind"])
+            for row in rows
+            if row.get("text")
+        ]
+        self._bm25_index.rebuild(entries, kinds=searchable_kinds)
+        logger.info(
+            "bm25 rebuild done entries=%s kinds=%s",
+            len(entries),
+            sorted(searchable_kinds, key=lambda k: k.value),
+        )
+
+    async def rebuild_bm25_index(
+        self,
+        kinds: set[NodeKind] | None = None,
+    ) -> None:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            self._executor, self._sync_rebuild_bm25_index, kinds
+        )
+
+    def _sync_upsert_bm25_entries(self, nodes: Sequence[StoredNode]) -> None:
+        entries = [
+            (node.node_id, node.text, node.kind)
+            for node in nodes
+            if node.kind in {NodeKind.SENTENCE, NodeKind.PARAGRAPH} and node.text
+        ]
+        if entries:
+            self._bm25_index.upsert(
+                entries,
+                kinds={NodeKind.SENTENCE, NodeKind.PARAGRAPH},
+            )
+            logger.info(
+                "bm25 upsert entries=%s total_index_size=%s",
+                len(entries),
+                self._bm25_index.size,
+            )
+
+    async def upsert_bm25_entries(self, nodes: Sequence[StoredNode]) -> None:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            self._executor, self._sync_upsert_bm25_entries, nodes
+        )
+
+    def _sync_search_bm25(
+        self,
+        query: str,
+        k: int,
+        kinds: set[NodeKind] | None,
+    ) -> list[tuple[str, float]]:
+        return self._bm25_index.search(query, k=k, kinds=kinds)
+
+    async def search_bm25(
+        self,
+        query: str,
+        *,
+        k: int = 5,
+        kinds: set[NodeKind] | None = None,
+    ) -> list[RetrievalMatch]:
+        loop = asyncio.get_event_loop()
+        hits = await loop.run_in_executor(
+            self._executor,
+            self._sync_search_bm25,
+            query,
+            k,
+            kinds,
+        )
+        if not hits:
+            return []
+
+        node_ids = [hit[0] for hit in hits]
+        rows = await loop.run_in_executor(
+            self._executor, self._vector_store.fetch_nodes, node_ids
+        )
+
+        matches: list[RetrievalMatch] = []
+        for node_id, score in hits:
+            row = rows.get(node_id)
+            if row is None:
+                continue
+            matches.append(RetrievalMatch(node=self._row_to_node(row), score=score))
+        return matches

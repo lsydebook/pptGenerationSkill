@@ -16,8 +16,8 @@ import os
 import sys
 from typing import Any
 
-import app.config  # noqa: F401  # loads .env
-from app.config import RAG_TABLE_PREFIX
+import src.config.env_loader  # noqa: F401
+from src.config.indexing_config import RAG_TABLE_PREFIX
 from pymilvus import MilvusClient
 
 OUTPUT_FIELDS = [
