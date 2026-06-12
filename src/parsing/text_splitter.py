@@ -12,6 +12,33 @@ def split_sentences(text: str) -> list[str]:
     return parts if parts else [stripped]
 
 
+def build_document_summary(
+    title: str,
+    full_text: str,
+    *,
+    max_chars: int = 2000,
+) -> str:
+    """为 DOCUMENT 根节点生成短摘要（标题 + 正文摘录），避免 Milvus text 字段存全文。"""
+    limit = max(64, max_chars)
+    title_line = (title or "").strip()
+    body = " ".join((full_text or "").split())
+    if not title_line and not body:
+        return ""
+    if not body:
+        return title_line[:limit]
+    prefix = f"{title_line}\n\n" if title_line else ""
+    budget = limit - len(prefix)
+    if budget <= 0:
+        return title_line[:limit]
+    if len(body) > budget:
+        cut = max(0, budget - 1)
+        excerpt = f"{body[:cut].rstrip()}…"
+    else:
+        excerpt = body
+    summary = f"{prefix}{excerpt}"
+    return summary[:limit]
+
+
 def split_paragraphs(text: str) -> list[str]:
     if not text:
         return []

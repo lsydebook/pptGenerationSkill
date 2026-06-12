@@ -9,6 +9,7 @@ from typing import Iterable, Literal, Sequence
 import numpy as np
 
 from src.config.embedding import EmbeddingModel
+from src.config.indexing_config import DOCUMENT_SUMMARY_MAX_CHARS
 from src.parsing.document_payload_builder import text_to_payload
 from src.parsing.document_types import (
     DocumentPayload,
@@ -19,7 +20,11 @@ from src.parsing.document_types import (
     StoredNode,
     TreeNode,
 )
-from src.parsing.text_splitter import split_paragraphs, split_sentences
+from src.parsing.text_splitter import (
+    build_document_summary,
+    split_paragraphs,
+    split_sentences,
+)
 from src.config.logging_config import get_logger
 from src.storage.milvus_rag_node_store import MilvusPostgresNodeStore
 
@@ -74,12 +79,19 @@ class DocumentTreeBuilder:
         root_metadata = dict(document.metadata)
         root_metadata.setdefault("document_id", document.document_id)
         root_metadata.setdefault("document_title", document.title)
+        root_metadata["total_chars"] = len(document_text)
+        root_metadata["text_is_summary"] = True
+        document_summary = build_document_summary(
+            document.title,
+            document_text,
+            max_chars=DOCUMENT_SUMMARY_MAX_CHARS,
+        )
         root = TreeNode(
             node_id=document.document_id,
             parent_id=None,
             kind=NodeKind.DOCUMENT,
             title=document.title,
-            text=document_text,
+            text=document_summary,
             metadata=root_metadata,
         )
 
@@ -222,10 +234,11 @@ class DocumentIndexer:
     async def index_document(self, document: DocumentPayload) -> list[StoredNode]:
         text_len = len(document.text or "")
         logger.info(
-            "index_document start doc_id=%s title=%s text_len=%s paragraph_mode=%s",
+            "index_document start doc_id=%s title=%s text_len=%s summary_max=%s paragraph_mode=%s",
             document.document_id,
             document.title,
             text_len,
+            DOCUMENT_SUMMARY_MAX_CHARS,
             self._paragraph_embedding_mode,
         )
         root = self._tree_indexer.build_tree(document)

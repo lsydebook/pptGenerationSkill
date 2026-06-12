@@ -1,16 +1,15 @@
-"""Convert PDF/Markdown/Text into structured DocumentPayloads."""
+"""Convert uploaded files into structured DocumentPayloads."""
 
-import re
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 from .document_types import DocumentPayload, ParagraphPayload, SectionPayload, SentencePayload
-from .pdf_parser import pdf_to_document_payload
+from .markitdown_reader import convert_path_to_markdown
+from .markdown_parser import parse_markdown_sections
 from .text_splitter import split_paragraphs, split_sentences
 
-HEADING_RE = re.compile(r"^(#{1,6})\s+(.*)$")
-MARKDOWN_EXTS = {".md", ".markdown"}
+TXT_EXTS = {".txt"}
 
 
 def text_to_payload(
@@ -53,70 +52,14 @@ def markdown_to_payload(
     markdown_text: str,
     metadata: dict[str, Any],
 ) -> DocumentPayload:
-    sections: list[SectionPayload] = []
-    current_paragraph_lines: list[str] = []
-    current_title = title
-    current_metadata: dict[str, Any] = {}
-    section_paragraphs: list[ParagraphPayload] = []
-
-    def flush_paragraph() -> None:
-        if not current_paragraph_lines:
-            return
-
-        paragraph_text = "\n".join(current_paragraph_lines).strip()
-        current_paragraph_lines.clear()
-
-        sentences = [
-            SentencePayload(text=sentence)
-            for sentence in split_sentences(paragraph_text)
-        ]
-        section_paragraphs.append(
-            ParagraphPayload(
-                text=paragraph_text,
-                sentences=sentences,
-            )
-        )
-
-    def flush_section() -> None:
-        if section_paragraphs:
-            sections.append(
-                SectionPayload(
-                    title=current_title,
-                    paragraphs=list(section_paragraphs),
-                    metadata=dict(current_metadata),
-                )
-            )
-            section_paragraphs.clear()
-
-    for line in markdown_text.splitlines():
-        heading_match = HEADING_RE.match(line)
-
-        if heading_match:
-            flush_paragraph()
-            flush_section()
-            current_title = heading_match.group(2).strip()
-            current_metadata = {"level": len(heading_match.group(1))}
-            continue
-
-        if not line.strip():
-            flush_paragraph()
-            continue
-
-        current_paragraph_lines.append(line)
-
-    flush_paragraph()
-    flush_section()
-
+    sections = parse_markdown_sections(markdown_text, default_title=title)
     if not sections:
-        sections = (
-            text_to_payload(
-                document_id=document_id,
-                title=title,
-                text=markdown_text,
-                metadata=metadata,
-            ).sections
-            or []
-        )
+        sections = text_to_payload(
+            document_id=document_id,
+            title=title,
+            text=markdown_text,
+            metadata=metadata,
+        ).sections or []
 
     return DocumentPayload(
         document_id=document_id,
@@ -179,6 +122,7 @@ def parse_document_path(
     title: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> DocumentPayload:
+    """解析本地文件：.txt 直读；其余格式 MarkItDown → markdown_parser。"""
     payload_metadata = dict(metadata or {})
     resolved = path.resolve()
     ext = resolved.suffix.lower()
@@ -189,26 +133,20 @@ def parse_document_path(
     document_id = doc_id or resolved.stem
     document_title = title or document_id
 
-    if ext == ".pdf":
-        return pdf_to_document_payload(
-            resolved,
-            doc_id=document_id,
-            title=document_title,
-            metadata=payload_metadata,
-        )
-
-    text = resolved.read_text(encoding="utf-8", errors="replace")
-    if ext in MARKDOWN_EXTS:
-        return markdown_to_payload(
+    if ext in TXT_EXTS:
+        text = resolved.read_text(encoding="utf-8", errors="replace")
+        return text_to_payload(
             document_id=document_id,
             title=document_title,
-            markdown_text=text,
+            text=text,
             metadata=payload_metadata,
         )
 
-    return text_to_payload(
+    markdown_text = convert_path_to_markdown(resolved)
+    payload_metadata["converted_via"] = "markitdown"
+    return markdown_to_payload(
         document_id=document_id,
         title=document_title,
-        text=text,
+        markdown_text=markdown_text,
         metadata=payload_metadata,
     )

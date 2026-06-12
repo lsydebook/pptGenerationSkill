@@ -8,11 +8,11 @@ dependencies = [
     "fastapi>=0.110.0",
     "uvicorn>=0.23.0",
     "python-multipart>=0.0.9",
-    "pypdf>=4.3.0",
     "pymilvus>=2.4.0",
     "dashscope>=1.20.0",
     "numpy>=1.24.0",
     "rank-bm25>=0.2.2",
     "python-dotenv>=1.0.0",
     "langchain-openai>=0.2.0",
+    "markitdown[all]>=0.1.5",
 ]
