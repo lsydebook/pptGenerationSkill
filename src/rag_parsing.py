@@ -18,7 +18,6 @@ from src.config.indexing_config import (
     MILVUS_TOKEN,
     MILVUS_URI,
     PARAGRAPH_MODE,
-    PARSE_CONCURRENCY,
     RAG_TABLE_PREFIX,
     RAG_VEC_COLLECTION_SUFFIX,
     SUPPORTED_EXTS,
@@ -35,7 +34,6 @@ from src.storage.milvus_rag_node_store import MilvusPostgresNodeStore
 _embedder: EmbeddingModel | None = None
 _datastore: MilvusPostgresNodeStore | None = None
 _indexer: DocumentIndexer | None = None
-_PARSE_SEMAPHORE = asyncio.Semaphore(PARSE_CONCURRENCY)
 
 
 class IndexingError(RuntimeError):
@@ -123,23 +121,15 @@ def get_indexer() -> DocumentIndexer:
     return _indexer
 
 
-async def run_indexing(request: IndexingRequest) -> IndexingResult:
+def validate_indexing_request(request: IndexingRequest) -> str | None:
+    """同步校验请求；通过则返回用于展示的 filename_hint。"""
     text_value = (request.text or "").strip()
     has_file = request.file_data is not None
-    logger.info(
-        "run_indexing start has_file=%s filename=%s text_len=%s",
-        has_file,
-        request.filename,
-        len(text_value),
-    )
 
     if not has_file and not text_value:
         raise IndexingError("missing file or text", status_code=400)
 
-    all_documents: list[dict[str, Any]] = []
-    indexing_summaries: list[dict[str, Any]] = []
-    response_filename = "input.txt"
-    response_content_type = "text/plain"
+    filename_hint = "input.txt"
 
     if has_file:
         if not request.filename:
@@ -152,8 +142,40 @@ async def run_indexing(request: IndexingRequest) -> IndexingResult:
         size_mb = len(request.file_data) / (1024 * 1024)
         if size_mb > MAX_FILE_SIZE_MB:
             raise IndexingError(f"file too large: {size_mb:.2f} MB", status_code=413)
+        filename_hint = request.filename
 
-        response_filename = request.filename
+    if text_value:
+        data = text_value.encode("utf-8")
+        size_mb = len(data) / (1024 * 1024)
+        if size_mb > MAX_FILE_SIZE_MB:
+            raise IndexingError(f"text too large: {size_mb:.2f} MB", status_code=413)
+        if has_file:
+            filename_hint = "mixed-input"
+
+    return filename_hint
+
+
+async def run_indexing(request: IndexingRequest) -> IndexingResult:
+    text_value = (request.text or "").strip()
+    has_file = request.file_data is not None
+    logger.info(
+        "run_indexing start has_file=%s filename=%s text_len=%s",
+        has_file,
+        request.filename,
+        len(text_value),
+    )
+
+    validate_indexing_request(request)
+    text_value = (request.text or "").strip()
+    has_file = request.file_data is not None
+
+    all_documents: list[dict[str, Any]] = []
+    indexing_summaries: list[dict[str, Any]] = []
+    response_filename = "input.txt"
+    response_content_type = "text/plain"
+
+    if has_file:
+        response_filename = request.filename or response_filename
         response_content_type = request.content_type
         documents, summary = await _parse_and_index_upload(
             data=request.file_data,
@@ -166,9 +188,6 @@ async def run_indexing(request: IndexingRequest) -> IndexingResult:
 
     if text_value:
         data = text_value.encode("utf-8")
-        size_mb = len(data) / (1024 * 1024)
-        if size_mb > MAX_FILE_SIZE_MB:
-            raise IndexingError(f"text too large: {size_mb:.2f} MB", status_code=413)
         documents, summary = await _parse_and_index_upload(
             data=data,
             filename="input.txt",
@@ -239,50 +258,49 @@ async def _parse_and_index_upload(
     content_type: str | None,
     note: str | None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    async with _PARSE_SEMAPHORE:
-        try:
-            ext = os.path.splitext(filename)[1].lower()
-            logger.info(
-                "parse_and_index step 1/3 parse start filename=%s ext=%s size_bytes=%s",
-                filename,
-                ext,
-                len(data),
-            )
-            payload = await asyncio.to_thread(
-                _bytes_to_payload, data, filename, content_type, note
-            )
-            logger.info(
-                "parse_and_index step 2/3 parse done doc_id=%s title=%s text_len=%s",
-                payload.document_id,
-                payload.title,
-                len(payload.text or ""),
-            )
-            stored_nodes = await get_indexer().index_document(payload)
-            documents = await asyncio.to_thread(documents_from_payload, payload)
-            for doc in documents:
-                doc_metadata = doc.setdefault("metadata", {})
-                doc_metadata.setdefault("source_filename", filename)
-                if content_type:
-                    doc_metadata.setdefault("content_type", content_type)
-                if note:
-                    doc_metadata.setdefault("note", note)
-            kind_breakdown: dict[str, int] = {}
-            for node in stored_nodes:
-                key = node.kind.value
-                kind_breakdown[key] = kind_breakdown.get(key, 0) + 1
-            logger.info(
-                "parse_and_index step 3/3 done doc_id=%s nodes=%s kinds=%s bm25_searchable=%s",
-                payload.document_id,
-                len(stored_nodes),
-                kind_breakdown,
-                get_datastore().bm25_index_size(),
-            )
-            return documents, {
-                "document_id": payload.document_id,
-                "nodes_indexed": len(stored_nodes),
-            }
-        except IndexingError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("parse_and_index_upload failed filename=%s", filename)
-            raise IndexingError(str(exc), status_code=500) from exc
+    try:
+        ext = os.path.splitext(filename)[1].lower()
+        logger.info(
+            "parse_and_index step 1/3 parse start filename=%s ext=%s size_bytes=%s",
+            filename,
+            ext,
+            len(data),
+        )
+        payload = await asyncio.to_thread(
+            _bytes_to_payload, data, filename, content_type, note
+        )
+        logger.info(
+            "parse_and_index step 2/3 parse done doc_id=%s title=%s text_len=%s",
+            payload.document_id,
+            payload.title,
+            len(payload.text or ""),
+        )
+        stored_nodes = await get_indexer().index_document(payload)
+        documents = await asyncio.to_thread(documents_from_payload, payload)
+        for doc in documents:
+            doc_metadata = doc.setdefault("metadata", {})
+            doc_metadata.setdefault("source_filename", filename)
+            if content_type:
+                doc_metadata.setdefault("content_type", content_type)
+            if note:
+                doc_metadata.setdefault("note", note)
+        kind_breakdown: dict[str, int] = {}
+        for node in stored_nodes:
+            key = node.kind.value
+            kind_breakdown[key] = kind_breakdown.get(key, 0) + 1
+        logger.info(
+            "parse_and_index step 3/3 done doc_id=%s nodes=%s kinds=%s bm25_searchable=%s",
+            payload.document_id,
+            len(stored_nodes),
+            kind_breakdown,
+            get_datastore().bm25_index_size(),
+        )
+        return documents, {
+            "document_id": payload.document_id,
+            "nodes_indexed": len(stored_nodes),
+        }
+    except IndexingError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("parse_and_index_upload failed filename=%s", filename)
+        raise IndexingError(str(exc), status_code=500) from exc

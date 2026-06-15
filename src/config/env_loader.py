@@ -38,3 +38,13 @@ def get_bool(name: str, default: bool = False) -> bool:
     if value is None or value == "":
         return default
     return value.lower() in {"1", "true", "yes"}
+
+
+def get_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        return default

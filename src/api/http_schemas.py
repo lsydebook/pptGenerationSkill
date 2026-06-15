@@ -20,6 +20,26 @@ class ParseResponse(BaseModel):
     indexing: list[IndexingSummary]
 
 
+class ParseJobAccepted(BaseModel):
+    job_id: str
+    status: str = "pending"
+    poll_url: str
+    filename: str | None = None
+    queue_position: int | None = None
+
+
+class JobStatusResponse(BaseModel):
+    job_id: str
+    status: str
+    filename: str | None = None
+    created_at: float
+    started_at: float | None = None
+    finished_at: float | None = None
+    queue_position: int | None = None
+    error: str | None = None
+    result: ParseResponse | None = None
+
+
 class RetrieveRequest(BaseModel):
     question: str
     top_k: int | None = Field(

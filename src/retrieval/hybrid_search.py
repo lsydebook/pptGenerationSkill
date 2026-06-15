@@ -179,6 +179,30 @@ async def hybrid_retrieve(
     queries = list(await active_planner.plan(question))
     if not queries:
         raise ValueError("Planner returned no queries.")
+    return await execute_hybrid_search(
+        question,
+        queries,
+        store=store,
+        embedder=embedder,
+        top_k=top_k,
+        bm25_top_k=bm25_top_k,
+    )
+
+
+async def execute_hybrid_search(
+    question: str,
+    queries: list[str],
+    *,
+    store: MilvusPostgresNodeStore,
+    embedder: EmbeddingModel,
+    top_k: int | None = None,
+    bm25_top_k: int | None = None,
+) -> RetrievalResult:
+    """向量检索 + 重排 + 上下文扩展（不含 LLM query 扩写）。"""
+    if not queries:
+        raise ValueError("queries must not be empty")
+
+    logger.info("execute_hybrid_search start query_count=%s", len(queries))
     logger.info("step 1/5 query_plan done count=%s queries=%s", len(queries), queries)
 
     query_vectors = await embedder.embed_text(queries)
@@ -186,11 +210,11 @@ async def hybrid_retrieve(
     bm25_k = bm25_top_k if bm25_top_k is not None else RETRIEVAL_BM25_TOP_K
     search_kinds = {NodeKind.SENTENCE, NodeKind.PARAGRAPH}
     logger.info(
-        "step 2/5 query_embed done dim=%s dense_top_k=%s bm25_top_k=%s use_planner=%s",
+        "step 2/5 query_embed done dim=%s dense_top_k=%s bm25_top_k=%s query_count=%s",
         query_vectors.shape[1] if len(query_vectors) else 0,
         k,
         bm25_k,
-        use_planner,
+        len(queries),
     )
 
     all_matches: list[RetrievalMatch] = []

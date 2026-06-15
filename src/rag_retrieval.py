@@ -17,9 +17,10 @@ from src.config.llm_config import (
     PLANNER_TEMPERATURE,
 )
 from src.config.logging_config import get_logger
+from src.concurrency.priority import coordinator
 from src.rag_parsing import get_datastore, get_embedder
-from src.retrieval.hybrid_search import RetrievalResult, hybrid_retrieve
-from src.retrieval.query_planner import LLMQueryPlanner
+from src.retrieval.hybrid_search import RetrievalResult, execute_hybrid_search
+from src.retrieval.query_planner import LLMQueryPlanner, SimpleQueryPlanner
 
 logger = get_logger(__name__)
 
@@ -106,7 +107,7 @@ async def run_retrieval(request: RetrievalRequest) -> RetrievalResponse:
     question = request.question.strip()
     if not question:
         raise RetrievalError("question is required", status_code=400)
-    if _planner is None:
+    if request.use_planner and _planner is None:
         raise RetrievalError("Retrieval pipeline not initialized", status_code=500)
 
     logger.info(
@@ -118,15 +119,29 @@ async def run_retrieval(request: RetrievalRequest) -> RetrievalResponse:
     )
 
     try:
-        result: RetrievalResult = await hybrid_retrieve(
-            question,
-            store=get_datastore(),
-            embedder=get_embedder(),
-            planner=_planner,
-            top_k=request.top_k,
-            bm25_top_k=request.bm25_top_k,
-            use_planner=request.use_planner,
+        planner: LLMQueryPlanner | SimpleQueryPlanner = (
+            _planner if request.use_planner else SimpleQueryPlanner()
         )
+
+        logger.info("run_retrieval step 1/2 query_plan start use_planner=%s", request.use_planner)
+        queries = list(await planner.plan(question))
+        if not queries:
+            raise RetrievalError("Planner returned no queries.", status_code=500)
+        logger.info(
+            "run_retrieval step 1/2 query_plan done count=%s (outside retrieval_slot)",
+            len(queries),
+        )
+
+        async with coordinator.retrieval_slot():
+            logger.info("run_retrieval step 2/2 vector_search start (inside retrieval_slot)")
+            result: RetrievalResult = await execute_hybrid_search(
+                question,
+                queries,
+                store=get_datastore(),
+                embedder=get_embedder(),
+                top_k=request.top_k,
+                bm25_top_k=request.bm25_top_k,
+            )
     except Exception as exc:  # noqa: BLE001
         logger.exception("run_retrieval failed question=%r", question[:200])
         raise RetrievalError(str(exc), status_code=500) from exc
