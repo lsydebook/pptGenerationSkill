@@ -17,6 +17,7 @@ from src.config.llm_config import (
     PLANNER_TEMPERATURE,
 )
 from src.config.logging_config import get_logger
+from src.cache.retrieval_cache import retrieval_cache
 from src.concurrency.priority import coordinator
 from src.rag_parsing import get_datastore, get_embedder
 from src.retrieval.hybrid_search import RetrievalResult, execute_hybrid_search
@@ -69,7 +70,11 @@ async def init_retrieval() -> None:
     if PLANNER_MAX_TOKENS:
         llm_kwargs["max_tokens"] = int(PLANNER_MAX_TOKENS)
     if not PLANNER_ENABLE_THINKING:
-        llm_kwargs["extra_body"] = {"enable_thinking": False}
+        # BUPT qwen-latest 网关需通过 chat_template_kwargs 关闭思考链；
+        # 仅传 enable_thinking 会仍生成大量 reasoning token，导致 10s+ 延迟。
+        llm_kwargs["extra_body"] = {
+            "chat_template_kwargs": {"enable_thinking": False},
+        }
 
     planner_llm = ChatOpenAI(**llm_kwargs)
     _planner = LLMQueryPlanner(llm=planner_llm, max_queries=PLANNER_MAX_QUERIES)
@@ -111,12 +116,22 @@ async def run_retrieval(request: RetrievalRequest) -> RetrievalResponse:
         raise RetrievalError("Retrieval pipeline not initialized", status_code=500)
 
     logger.info(
-        "run_retrieval start question_len=%s use_planner=%s top_k=%s bm25_top_k=%s",
+        "run_retrieval start question_len=%s use_planner=%s top_k=%s bm25_top_k=%s cache=%s",
         len(question),
         request.use_planner,
         request.top_k,
         request.bm25_top_k,
+        retrieval_cache.enabled,
     )
+
+    cached = await retrieval_cache.get(request)
+    if cached is not None:
+        return RetrievalResponse(
+            question=cached["question"],
+            queries=list(cached.get("queries") or []),
+            matches=list(cached.get("matches") or []),
+            snippets=list(cached.get("snippets") or []),
+        )
 
     try:
         planner: LLMQueryPlanner | SimpleQueryPlanner = (
@@ -157,9 +172,19 @@ async def run_retrieval(request: RetrievalRequest) -> RetrievalResponse:
         len(result.snippets),
         top_matches,
     )
-    return RetrievalResponse(
+    response = RetrievalResponse(
         question=result.question,
         queries=result.queries,
         matches=[_match_to_dict(m) for m in result.matches],
         snippets=[_snippet_to_dict(s) for s in result.snippets],
     )
+    await retrieval_cache.set(
+        request,
+        {
+            "question": response.question,
+            "queries": response.queries,
+            "matches": response.matches,
+            "snippets": response.snippets,
+        },
+    )
+    return response

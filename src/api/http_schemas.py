@@ -28,6 +28,12 @@ class ParseJobAccepted(BaseModel):
     queue_position: int | None = None
 
 
+class JobResultSummary(BaseModel):
+    filename: str
+    content_type: str | None = None
+    indexing: list[IndexingSummary]
+
+
 class JobStatusResponse(BaseModel):
     job_id: str
     status: str
@@ -37,7 +43,7 @@ class JobStatusResponse(BaseModel):
     finished_at: float | None = None
     queue_position: int | None = None
     error: str | None = None
-    result: ParseResponse | None = None
+    result: JobResultSummary | None = None
 
 
 class RetrieveRequest(BaseModel):

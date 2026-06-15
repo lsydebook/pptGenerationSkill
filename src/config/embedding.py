@@ -1,19 +1,20 @@
-"""DashScope 向量化实现（入库与检索共用）。
+"""OpenAI 兼容网关向量化实现（入库与检索共用）。
 
-模型名称、API Key 等见 llm_config.py / .env。
+模型名称、API Key、Base URL 等见 llm_config.py / .env。
 """
 
 from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from http import HTTPStatus
 from typing import Sequence
 
 import numpy as np
+from openai import OpenAI
 
 from src.config.llm_config import (
-    DASHSCOPE_API_KEY,
+    EMBEDDING_API_KEY,
+    EMBEDDING_BASE_URL,
     EMBEDDING_BATCH_SIZE,
     EMBEDDING_DIM,
     EMBEDDING_MODEL,
@@ -21,11 +22,6 @@ from src.config.llm_config import (
 from src.config.logging_config import get_logger
 
 logger = get_logger(__name__)
-
-try:
-    import dashscope
-except ImportError:  # pragma: no cover
-    dashscope = None  # type: ignore[assignment]
 
 
 def _normalize(vectors: np.ndarray) -> np.ndarray:
@@ -35,14 +31,17 @@ def _normalize(vectors: np.ndarray) -> np.ndarray:
 
 
 class EmbeddingModel:
-    """DashScope MultiModalEmbedding 封装。"""
+    """OpenAI-compatible embeddings API（如 bge-m3）。"""
 
     def __init__(self) -> None:
-        if dashscope is None:
-            raise ImportError("dashscope is required")
-        if not DASHSCOPE_API_KEY:
-            raise ValueError("DASHSCOPE_API_KEY is required")
-        dashscope.api_key = DASHSCOPE_API_KEY
+        if not EMBEDDING_API_KEY:
+            raise ValueError("EMBEDDING_API_KEY is required")
+        if not EMBEDDING_BASE_URL:
+            raise ValueError("EMBEDDING_BASE_URL is required")
+        self._client = OpenAI(
+            api_key=EMBEDDING_API_KEY,
+            base_url=EMBEDDING_BASE_URL,
+        )
         self._model_name = EMBEDDING_MODEL
         self._batch_size = max(1, EMBEDDING_BATCH_SIZE)
         self.dimension = EMBEDDING_DIM
@@ -53,22 +52,12 @@ class EmbeddingModel:
             self._executor.shutdown(wait=False)
 
     def _sync_embed_batch(self, texts: Sequence[str]) -> np.ndarray:
-        response = dashscope.MultiModalEmbedding.call(
+        response = self._client.embeddings.create(
             model=self._model_name,
-            input=[{"text": text} for text in texts],
+            input=list(texts),
         )
-        if response.status_code != HTTPStatus.OK:
-            message = getattr(response, "message", str(response))
-            code = getattr(response, "code", "")
-            raise RuntimeError(
-                f"DashScope embedding failed: status={response.status_code}, "
-                f"code={code}, message={message}"
-            )
-        items = sorted(
-            (response.output or {}).get("embeddings") or [],
-            key=lambda item: item.get("index", 0),
-        )
-        vectors = np.asarray([item["embedding"] for item in items], dtype=np.float32)
+        items = sorted(response.data, key=lambda item: item.index)
+        vectors = np.asarray([item.embedding for item in items], dtype=np.float32)
         if vectors.shape[1] != self.dimension:
             self.dimension = int(vectors.shape[1])
         return _normalize(vectors).astype(np.float32, copy=False)

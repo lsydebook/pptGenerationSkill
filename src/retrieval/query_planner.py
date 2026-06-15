@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from typing import Sequence
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -51,11 +52,21 @@ class LLMQueryPlanner:
             max_extra_queries=max_extra,
         )
 
+        t0 = time.perf_counter()
         response = await self._llm.ainvoke(
             [
                 SystemMessage(content=self._system_prompt),
                 HumanMessage(content=prompt),
             ]
+        )
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        meta = getattr(response, "response_metadata", {}) or {}
+        usage = meta.get("token_usage") or meta.get("usage") or {}
+        logger.info(
+            "query_planner llm_done elapsed_ms=%s completion_tokens=%s total_tokens=%s",
+            elapsed_ms,
+            usage.get("completion_tokens"),
+            usage.get("total_tokens"),
         )
         raw = _strip_thinking(str(response.content or ""))
 
