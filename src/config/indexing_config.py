@@ -29,8 +29,12 @@ MARKITDOWN_EXTS = {
 # 允许上传并解析的文件扩展名
 SUPPORTED_EXTS = TXT_EXTS | MARKITDOWN_EXTS
 
-# Milvus collection 名称前缀（如 rag_nodes_vec）
+# Milvus collection 名称前缀（如 rag_nodes_vec_v2）
 RAG_TABLE_PREFIX = get_env("RAG_TABLE_PREFIX", "rag_nodes")
+# 主向量 collection 后缀（含 Zilliz BM25 sparse 的 schema 版本，变更后需重新入库）
+RAG_VEC_COLLECTION_SUFFIX = get_env("RAG_VEC_COLLECTION_SUFFIX", "v2")
+# BM25 全文检索 text 字段 analyzer 类型（Zilliz 内置 chinese / standard 等）
+MILVUS_BM25_ANALYZER = get_env("MILVUS_BM25_ANALYZER", "chinese")
 # 段落向量策略：averaged（子句平均）| full（整段编码）| both（两种都存）
 PARAGRAPH_MODE = get_env("PARAGRAPH_MODE", "averaged")
 # DOCUMENT 根节点 text 字段仅存摘要的最大字符数（全文在段落/句子子节点中）

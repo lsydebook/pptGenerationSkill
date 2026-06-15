@@ -267,7 +267,6 @@ class DocumentIndexer:
             searchable,
         )
         await self._datastore.upsert_nodes(stored_nodes)
-        await self._datastore.upsert_bm25_entries(stored_nodes)
         logger.info(
             "index_document step 4/4 done doc_id=%s nodes=%s kinds=%s searchable=%s",
             document.document_id,

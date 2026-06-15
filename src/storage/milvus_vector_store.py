@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
-from pymilvus import CollectionSchema, DataType, FieldSchema, MilvusClient
+from pymilvus import CollectionSchema, DataType, FieldSchema, Function, FunctionType, MilvusClient
 from pymilvus.milvus_client import IndexParams
 
+from src.config.indexing_config import MILVUS_BM25_ANALYZER, RAG_VEC_COLLECTION_SUFFIX
 from src.parsing.document_types import NodeKind, StoredNode
+from src.storage.bm25_scores import normalize_bm25_top_k
 
 OUTPUT_FIELDS = [
     "node_id",
@@ -20,6 +22,10 @@ OUTPUT_FIELDS = [
     "created_at",
     "embedding",
 ]
+
+BM25_SPARSE_FIELD = "sparse"
+BM25_FUNCTION_NAME = "text_bm25_emb"
+BM25_SEARCH_PARAMS = {"params": {"level": 10}}
 
 
 def _vector_to_list(vector: Sequence[float]) -> list[float]:
@@ -46,12 +52,15 @@ class MilvusVectorStore:
         image_collection: str | None,
         create_para_full: bool,
         create_image: bool,
+        collection_suffix: str | None = None,
     ) -> None:
         self._dimensions = int(dimensions)
         self._metric = metric.upper()
         self._index_type = index_type.upper()
         self._search_nprobe = search_nprobe
         self._search_ef = search_ef
+        self._collection_suffix = collection_suffix or RAG_VEC_COLLECTION_SUFFIX
+        self._bm25_analyzer = MILVUS_BM25_ANALYZER
 
         client_kwargs: dict[str, Any] = {"uri": milvus_uri}
         if milvus_token:
@@ -61,18 +70,21 @@ class MilvusVectorStore:
         self._client = MilvusClient(**client_kwargs)
 
         self._table_prefix = table_prefix
-        self._collection_name = f"{table_prefix}_vec"
-        self._para_full_name = f"{table_prefix}_para_full_vec"
-        self._image_name = image_collection or f"{table_prefix}_images_vec"
+        suffix = f"_{self._collection_suffix}" if self._collection_suffix else ""
+        self._collection_name = f"{table_prefix}_vec{suffix}"
+        self._para_full_name = f"{table_prefix}_para_full_vec{suffix}"
+        self._image_name = image_collection or f"{table_prefix}_images_vec{suffix}"
 
-        self._ensure_collection(self._collection_name)
+        self._ensure_collection(self._collection_name, with_bm25=True)
         self._para_full_collection_name = self._ensure_collection(
             self._para_full_name,
             create_if_missing=create_para_full,
+            with_bm25=False,
         )
         self._image_collection_name = self._ensure_collection(
             self._image_name,
             create_if_missing=create_image,
+            with_bm25=False,
         )
 
     @property
@@ -91,18 +103,33 @@ class MilvusVectorStore:
     def image_collection(self) -> str | None:
         return self._image_collection_name
 
+    @property
+    def bm25_enabled(self) -> bool:
+        return True
+
     def close(self) -> None:
         self._client.close()
 
     def ensure_para_full_collection(self) -> None:
         if self._para_full_collection_name is None:
-            self._para_full_collection_name = self._ensure_collection(self._para_full_name)
+            self._para_full_collection_name = self._ensure_collection(
+                self._para_full_name,
+                with_bm25=False,
+            )
 
     def ensure_image_collection(self) -> None:
         if self._image_collection_name is None:
-            self._image_collection_name = self._ensure_collection(self._image_name)
+            self._image_collection_name = self._ensure_collection(
+                self._image_name,
+                with_bm25=False,
+            )
 
-    def _build_schema(self) -> CollectionSchema:
+    def _common_fields(self, *, enable_text_analyzer: bool) -> list[FieldSchema]:
+        text_params: dict[str, Any] = {"max_length": 65535}
+        if enable_text_analyzer:
+            text_params["enable_analyzer"] = True
+            text_params["analyzer_params"] = {"type": self._bm25_analyzer}
+
         fields = [
             FieldSchema(
                 name="node_id",
@@ -114,7 +141,7 @@ class MilvusVectorStore:
             FieldSchema(name="parent_id", dtype=DataType.VARCHAR, max_length=512),
             FieldSchema(name="kind", dtype=DataType.VARCHAR, max_length=32),
             FieldSchema(name="title", dtype=DataType.VARCHAR, max_length=4096),
-            FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=65535),
+            FieldSchema(name="text", dtype=DataType.VARCHAR, **text_params),
             FieldSchema(name="metadata", dtype=DataType.JSON),
             FieldSchema(name="child_ids", dtype=DataType.JSON),
             FieldSchema(name="created_at", dtype=DataType.INT64),
@@ -124,13 +151,32 @@ class MilvusVectorStore:
                 dim=self._dimensions,
             ),
         ]
+        return fields
+
+    def _build_main_schema(self) -> CollectionSchema:
+        fields = self._common_fields(enable_text_analyzer=True)
+        fields.append(
+            FieldSchema(name=BM25_SPARSE_FIELD, dtype=DataType.SPARSE_FLOAT_VECTOR)
+        )
+        bm25_function = Function(
+            name=BM25_FUNCTION_NAME,
+            input_field_names=["text"],
+            output_field_names=[BM25_SPARSE_FIELD],
+            function_type=FunctionType.BM25,
+        )
         return CollectionSchema(
-            fields,
-            description="document nodes with vectors and metadata",
+            fields=fields,
+            functions=[bm25_function],
+            description="document nodes with dense+sparse BM25",
         )
 
-    def _build_index_params(self) -> IndexParams:
-        index_params = IndexParams()
+    def _build_dense_schema(self) -> CollectionSchema:
+        return CollectionSchema(
+            fields=self._common_fields(enable_text_analyzer=False),
+            description="document nodes with dense vectors only",
+        )
+
+    def _add_dense_index(self, index_params: IndexParams) -> None:
         if self._index_type == "HNSW":
             index_params.add_index(
                 field_name="embedding",
@@ -151,9 +197,29 @@ class MilvusVectorStore:
                 index_type="FLAT",
                 metric_type=self._metric,
             )
+
+    def _build_main_index_params(self) -> IndexParams:
+        index_params = IndexParams()
+        self._add_dense_index(index_params)
+        index_params.add_index(
+            field_name=BM25_SPARSE_FIELD,
+            index_type="AUTOINDEX",
+            metric_type="BM25",
+        )
         return index_params
 
-    def _ensure_collection(self, name: str, *, create_if_missing: bool = True) -> str | None:
+    def _build_dense_index_params(self) -> IndexParams:
+        index_params = IndexParams()
+        self._add_dense_index(index_params)
+        return index_params
+
+    def _ensure_collection(
+        self,
+        name: str,
+        *,
+        create_if_missing: bool = True,
+        with_bm25: bool = False,
+    ) -> str | None:
         if self._client.has_collection(name):
             self._client.load_collection(name)
             return name
@@ -161,10 +227,16 @@ class MilvusVectorStore:
         if not create_if_missing:
             return None
 
+        schema = self._build_main_schema() if with_bm25 else self._build_dense_schema()
+        index_params = (
+            self._build_main_index_params()
+            if with_bm25
+            else self._build_dense_index_params()
+        )
         self._client.create_collection(
             collection_name=name,
-            schema=self._build_schema(),
-            index_params=self._build_index_params(),
+            schema=schema,
+            index_params=index_params,
         )
         return name
 
@@ -380,31 +452,66 @@ class MilvusVectorStore:
             for hit in hits
         ]
 
-    def fetch_all_searchable_nodes(
+    def search_bm25(
         self,
+        query_text: str,
+        k: int,
+        kinds: set[NodeKind] | None,
         *,
+        date_start: int | None = None,
+        date_end: int | None = None,
+    ) -> list[tuple[str, float]]:
+        """Zilliz BM25 full-text search on sparse field (chinese analyzer)."""
+        query = (query_text or "").strip()
+        if not query or k <= 0:
+            return []
+
+        filter_expr = self._build_expr(
+            kinds,
+            date_start=date_start,
+            date_end=date_end,
+        )
+        results = self._client.search(
+            collection_name=self._collection_name,
+            data=[query],
+            anns_field=BM25_SPARSE_FIELD,
+            search_params=BM25_SEARCH_PARAMS,
+            limit=k,
+            filter=filter_expr or "",
+            output_fields=["node_id", "kind"],
+        )
+        hits = results[0] if results else []
+        raw_hits = [
+            (self._hit_node_id(hit), self._hit_distance(hit))
+            for hit in hits
+            if self._hit_node_id(hit)
+        ]
+        return normalize_bm25_top_k(raw_hits)
+
+    def count_searchable_nodes(
+        self,
         kinds: set[NodeKind] | None = None,
-        batch_size: int = 500,
-    ) -> list[dict]:
-        """Fetch node_id/kind/text for BM25 indexing."""
+    ) -> int:
         filter_expr = self._expr_for_kinds(kinds)
-        rows: list[dict] = []
-        offset = 0
-        while True:
-            results = self._client.query(
-                collection_name=self._collection_name,
-                filter=filter_expr or "",
-                output_fields=["node_id", "kind", "text"],
-                limit=batch_size,
-                offset=offset,
-            )
-            if not results:
-                break
-            rows.extend(self._row_to_dict(r) for r in results)
-            if len(results) < batch_size:
-                break
-            offset += batch_size
-        return rows
+        results = self._client.query(
+            collection_name=self._collection_name,
+            filter=filter_expr or "",
+            output_fields=["node_id"],
+        )
+        return len(results)
+
+    def has_searchable_nodes(
+        self,
+        kinds: set[NodeKind] | None = None,
+    ) -> bool:
+        filter_expr = self._expr_for_kinds(kinds)
+        results = self._client.query(
+            collection_name=self._collection_name,
+            filter=filter_expr or "",
+            output_fields=["node_id"],
+            limit=1,
+        )
+        return bool(results)
 
     def search_with_details(
         self,

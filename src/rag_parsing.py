@@ -20,6 +20,7 @@ from src.config.indexing_config import (
     PARAGRAPH_MODE,
     PARSE_CONCURRENCY,
     RAG_TABLE_PREFIX,
+    RAG_VEC_COLLECTION_SUFFIX,
     SUPPORTED_EXTS,
 )
 from src.config.llm_config import EMBEDDING_MODEL
@@ -90,11 +91,10 @@ async def init_parsing() -> None:
         datastore=_datastore,
         paragraph_embedding_mode=PARAGRAPH_MODE,
     )
-    await _datastore.rebuild_bm25_index()
     logger.info(
-        "init parsing done milvus_prefix=%s bm25_entries=%s",
+        "init parsing done milvus_prefix=%s collection_suffix=%s bm25=zilliz",
         RAG_TABLE_PREFIX,
-        _datastore.bm25_index_size(),
+        RAG_VEC_COLLECTION_SUFFIX,
     )
 
 
@@ -271,7 +271,7 @@ async def _parse_and_index_upload(
                 key = node.kind.value
                 kind_breakdown[key] = kind_breakdown.get(key, 0) + 1
             logger.info(
-                "parse_and_index step 3/3 done doc_id=%s nodes=%s kinds=%s bm25_total=%s",
+                "parse_and_index step 3/3 done doc_id=%s nodes=%s kinds=%s bm25_searchable=%s",
                 payload.document_id,
                 len(stored_nodes),
                 kind_breakdown,

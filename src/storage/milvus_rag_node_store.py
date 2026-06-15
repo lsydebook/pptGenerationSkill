@@ -16,7 +16,6 @@ from typing import Literal, Sequence
 import src.config.env_loader  # noqa: F401  # 加载 .env
 from src.config.logging_config import get_logger
 from src.parsing.document_types import NodeKind, RetrievalMatch, StoredNode
-from src.storage.bm25_index import BM25Index
 
 from .milvus_vector_store import MilvusVectorStore
 
@@ -75,7 +74,6 @@ class MilvusPostgresNodeStore:
             create_para_full=True,
             create_image=False,
         )
-        self._bm25_index = BM25Index()
 
     def __del__(self) -> None:
         if hasattr(self, "_executor"):
@@ -98,7 +96,7 @@ class MilvusPostgresNodeStore:
             "milvus upsert_nodes count=%s kinds=%s collection=%s",
             len(nodes),
             kind_counts,
-            getattr(self._vector_store.collection, "name", self._table_prefix),
+            getattr(self._vector_store, "collection", self._table_prefix),
         )
         # All metadata + vectors go into the main collection
         self._vector_store.upsert_nodes(self._vector_store.collection, nodes)
@@ -342,64 +340,21 @@ class MilvusPostgresNodeStore:
         self._paragraph_search_mode = mode
 
     # ------------------------------------------------------------------
-    # BM25 hybrid search
+    # BM25 hybrid search (Zilliz sparse + chinese analyzer)
     # ------------------------------------------------------------------
 
+    def _searchable_kinds(self) -> set[NodeKind]:
+        return {NodeKind.SENTENCE, NodeKind.PARAGRAPH}
+
     def has_bm25_index(self) -> bool:
-        return self._bm25_index.size > 0
+        if not self._vector_store.bm25_enabled:
+            return False
+        return self._vector_store.has_searchable_nodes(kinds=self._searchable_kinds())
 
     def bm25_index_size(self) -> int:
-        return self._bm25_index.size
-
-    def _sync_rebuild_bm25_index(
-        self,
-        kinds: set[NodeKind] | None = None,
-    ) -> None:
-        searchable_kinds = kinds or {NodeKind.SENTENCE, NodeKind.PARAGRAPH}
-        rows = self._vector_store.fetch_all_searchable_nodes(kinds=searchable_kinds)
-        entries = [
-            (row["node_id"], row["text"], row["kind"])
-            for row in rows
-            if row.get("text")
-        ]
-        self._bm25_index.rebuild(entries, kinds=searchable_kinds)
-        logger.info(
-            "bm25 rebuild done entries=%s kinds=%s",
-            len(entries),
-            sorted(searchable_kinds, key=lambda k: k.value),
-        )
-
-    async def rebuild_bm25_index(
-        self,
-        kinds: set[NodeKind] | None = None,
-    ) -> None:
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            self._executor, self._sync_rebuild_bm25_index, kinds
-        )
-
-    def _sync_upsert_bm25_entries(self, nodes: Sequence[StoredNode]) -> None:
-        entries = [
-            (node.node_id, node.text, node.kind)
-            for node in nodes
-            if node.kind in {NodeKind.SENTENCE, NodeKind.PARAGRAPH} and node.text
-        ]
-        if entries:
-            self._bm25_index.upsert(
-                entries,
-                kinds={NodeKind.SENTENCE, NodeKind.PARAGRAPH},
-            )
-            logger.info(
-                "bm25 upsert entries=%s total_index_size=%s",
-                len(entries),
-                self._bm25_index.size,
-            )
-
-    async def upsert_bm25_entries(self, nodes: Sequence[StoredNode]) -> None:
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            self._executor, self._sync_upsert_bm25_entries, nodes
-        )
+        if not self._vector_store.bm25_enabled:
+            return 0
+        return self._vector_store.count_searchable_nodes(kinds=self._searchable_kinds())
 
     def _sync_search_bm25(
         self,
@@ -407,7 +362,7 @@ class MilvusPostgresNodeStore:
         k: int,
         kinds: set[NodeKind] | None,
     ) -> list[tuple[str, float]]:
-        return self._bm25_index.search(query, k=k, kinds=kinds)
+        return self._vector_store.search_bm25(query, k, kinds)
 
     async def search_bm25(
         self,

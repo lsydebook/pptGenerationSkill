@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Sequence
-
-import numpy as np
+from typing import Literal
 
 from src.config.embedding import EmbeddingModel
 from src.config.retrieval_config import (
@@ -38,13 +36,101 @@ class RetrievalResult:
 
 
 def deduplicate_matches(matches: list[RetrievalMatch]) -> list[RetrievalMatch]:
-    seen_ids: set[str] = set()
-    unique: list[RetrievalMatch] = []
+    """按 node_id 去重，score 取多路命中中的最大值。"""
+    best: dict[str, RetrievalMatch] = {}
     for match in matches:
-        if match.node.node_id not in seen_ids:
-            seen_ids.add(match.node.node_id)
-            unique.append(match)
-    return unique
+        node_id = match.node.node_id
+        prev = best.get(node_id)
+        if prev is None or match.score > prev.score:
+            best[node_id] = RetrievalMatch(node=match.node, score=match.score)
+    return list(best.values())
+
+
+def _aggregate_node_stats(
+    matches: list[RetrievalMatch],
+) -> dict[str, dict]:
+    node_stats: dict[str, dict] = {}
+    for match in matches:
+        node_id = match.node.node_id
+        if node_id not in node_stats:
+            node_stats[node_id] = {
+                "match": match,
+                "frequency": 0,
+                "total_score": 0.0,
+                "max_score": 0.0,
+            }
+        stats = node_stats[node_id]
+        stats["frequency"] += 1
+        stats["total_score"] += match.score
+        if match.score > stats["max_score"]:
+            stats["max_score"] = match.score
+            stats["match"] = match
+    return node_stats
+
+
+def _final_rerank_score(
+    stats: dict,
+    strategy: str,
+    *,
+    max_freq: int,
+    max_total_score: float,
+) -> float:
+    key = strategy.lower()
+    if key == "frequency":
+        return stats["frequency"] / max_freq
+    if key == "score":
+        return stats["total_score"] / max_total_score
+    if key == "combined":
+        return (
+            0.4 * (stats["frequency"] / max_freq)
+            + 0.6 * (stats["total_score"] / max_total_score)
+        )
+    return stats["max_score"]
+
+
+def rerank_matches(
+    matches: list[RetrievalMatch],
+    *,
+    strategy: str | None,
+) -> list[RetrievalMatch]:
+    if not matches:
+        return []
+
+    node_stats = _aggregate_node_stats(matches)
+    if not strategy:
+        return [
+            RetrievalMatch(node=stats["match"].node, score=stats["max_score"])
+            for stats in node_stats.values()
+        ]
+
+    key = strategy.lower()
+    max_freq = max(s["frequency"] for s in node_stats.values())
+    max_total_score = max(s["total_score"] for s in node_stats.values())
+    max_freq = max(max_freq, 1)
+    max_total_score = max(max_total_score, 0.001)
+
+    ranked = sorted(
+        node_stats.values(),
+        key=lambda stats: _final_rerank_score(
+            stats,
+            key,
+            max_freq=max_freq,
+            max_total_score=max_total_score,
+        ),
+        reverse=True,
+    )
+    return [
+        RetrievalMatch(
+            node=stats["match"].node,
+            score=_final_rerank_score(
+                stats,
+                key,
+                max_freq=max_freq,
+                max_total_score=max_total_score,
+            ),
+        )
+        for stats in ranked
+    ]
 
 
 def merge_matches_keep_max_score(
@@ -75,54 +161,6 @@ def tree_deduplicate_matches(matches: list[RetrievalMatch]) -> list[RetrievalMat
     if not child_ids:
         return matches
     return [m for m in matches if m.node.node_id not in child_ids]
-
-
-def rerank_matches(
-    matches: list[RetrievalMatch],
-    *,
-    strategy: str | None,
-) -> list[RetrievalMatch]:
-    if not strategy or not matches:
-        return matches
-
-    node_stats: dict[str, dict] = {}
-    for match in matches:
-        node_id = match.node.node_id
-        if node_id not in node_stats:
-            node_stats[node_id] = {"match": match, "frequency": 0, "total_score": 0.0}
-        node_stats[node_id]["frequency"] += 1
-        node_stats[node_id]["total_score"] += match.score
-
-    unique_matches = [stats["match"] for stats in node_stats.values()]
-    key = strategy.lower()
-
-    if key == "frequency":
-        unique_matches.sort(
-            key=lambda m: (
-                node_stats[m.node.node_id]["frequency"],
-                node_stats[m.node.node_id]["total_score"],
-            ),
-            reverse=True,
-        )
-    elif key == "score":
-        unique_matches.sort(
-            key=lambda m: node_stats[m.node.node_id]["total_score"],
-            reverse=True,
-        )
-    elif key == "combined":
-        max_freq = max(s["frequency"] for s in node_stats.values())
-        max_total_score = max(s["total_score"] for s in node_stats.values())
-        max_freq = max(max_freq, 1)
-        max_total_score = max(max_total_score, 0.001)
-        unique_matches.sort(
-            key=lambda m: (
-                0.4 * (node_stats[m.node.node_id]["frequency"] / max_freq)
-                + 0.6
-                * (node_stats[m.node.node_id]["total_score"] / max_total_score)
-            ),
-            reverse=True,
-        )
-    return unique_matches
 
 
 async def hybrid_retrieve(
