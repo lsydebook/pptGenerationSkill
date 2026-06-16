@@ -8,13 +8,21 @@ from src.parsing.document_types import ContextSnippet, NodeKind, RetrievalMatch,
 
 
 class NodeStore(Protocol):
-    async def get_context(
+    async def get_context_batch(
         self,
-        node_id: str,
-        *,
-        parent_depth: int = 1,
-        child_depth: int = 0,
-    ) -> list[StoredNode]: ...
+        specs: Sequence[tuple[str, int, int]],
+    ) -> list[list[StoredNode]]: ...
+
+
+def _expand_parent_depth(
+    match: RetrievalMatch,
+    parent_depth: int,
+) -> int:
+    if match.node.kind == NodeKind.PARAGRAPH:
+        return 0
+    if match.node.kind == NodeKind.SENTENCE and parent_depth > 0:
+        return min(parent_depth, 1)
+    return parent_depth
 
 
 async def matches_to_snippets(
@@ -26,20 +34,21 @@ async def matches_to_snippets(
     dedup: str = "none",
 ) -> list[ContextSnippet]:
     """Expand each match into parent/child context and optionally deduplicate."""
-    snippets: list[ContextSnippet] = []
-    for rank, match in enumerate(matches, 1):
-        # 段落已是完整语义单元，不再上溯到 section（通常只有标题，会挤掉正文）
-        expand_parent = parent_depth
-        if match.node.kind == NodeKind.PARAGRAPH:
-            expand_parent = 0
-        elif match.node.kind == NodeKind.SENTENCE and parent_depth > 0:
-            expand_parent = min(parent_depth, 1)
+    if not matches:
+        return []
 
-        nodes = await store.get_context(
+    specs = [
+        (
             match.node.node_id,
-            parent_depth=expand_parent,
-            child_depth=child_depth,
+            _expand_parent_depth(match, parent_depth),
+            child_depth,
         )
+        for match in matches
+    ]
+    context_batches = await store.get_context_batch(specs)
+
+    snippets: list[ContextSnippet] = []
+    for rank, (match, nodes) in enumerate(zip(matches, context_batches, strict=True), 1):
         for context_node in nodes:
             snippets.append(
                 ContextSnippet(

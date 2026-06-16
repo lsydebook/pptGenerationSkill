@@ -14,6 +14,7 @@ from functools import partial
 from typing import Literal, Sequence
 
 import src.config.env_loader  # noqa: F401  # 加载 .env
+from src.config.indexing_config import MILVUS_IO_WORKERS
 from src.config.logging_config import get_logger
 from src.parsing.document_types import NodeKind, RetrievalMatch, StoredNode
 
@@ -58,7 +59,7 @@ class MilvusPostgresNodeStore:
         if not self._milvus_uri:
             raise ValueError("MILVUS_URI is required")
 
-        self._executor = ThreadPoolExecutor(max_workers=1)
+        self._executor = ThreadPoolExecutor(max_workers=max(1, MILVUS_IO_WORKERS))
 
         self._vector_store = MilvusVectorStore(
             dimensions=self._dimensions,
@@ -136,14 +137,25 @@ class MilvusPostgresNodeStore:
             created_at=row.get("created_at", 0) or 0,
         )
 
-    async def get_node(self, node_id: str) -> StoredNode:
+    async def get_nodes(self, node_ids: Sequence[str]) -> dict[str, StoredNode]:
+        ids = [node_id for node_id in node_ids if node_id]
+        if not ids:
+            return {}
         loop = asyncio.get_event_loop()
-        row = await loop.run_in_executor(
-            self._executor, self._vector_store.fetch_node, node_id
+        rows = await loop.run_in_executor(
+            self._executor, self._vector_store.fetch_nodes, ids
         )
-        if row is None:
+        return {
+            node_id: self._row_to_node(row)
+            for node_id, row in rows.items()
+        }
+
+    async def get_node(self, node_id: str) -> StoredNode:
+        nodes = await self.get_nodes([node_id])
+        node = nodes.get(node_id)
+        if node is None:
             raise KeyError(node_id)
-        return self._row_to_node(row)
+        return node
 
     # ------------------------------------------------------------------
     # Search
@@ -164,6 +176,132 @@ class MilvusPostgresNodeStore:
         return self._vector_store.search(
             collection, query_vector, k, kinds,
             date_start=date_start, date_end=date_end,
+        )
+
+    def _hits_to_matches(
+        self,
+        hits: Sequence[tuple[str, float]],
+        rows: dict[str, dict],
+        *,
+        paragraph_mode: ParagraphSearchMode | None = None,
+        limit: int | None = None,
+    ) -> list[RetrievalMatch]:
+        mode = paragraph_mode or self._paragraph_search_mode
+        matches: list[RetrievalMatch] = []
+        seen: set[str] = set()
+        for node_id, score in hits:
+            row = rows.get(node_id)
+            if row is None:
+                continue
+            if mode == "both" and node_id in seen:
+                continue
+            seen.add(node_id)
+            matches.append(RetrievalMatch(node=self._row_to_node(row), score=score))
+        matches.sort(key=lambda item: item.score, reverse=True)
+        if limit is not None:
+            return matches[:limit]
+        return matches
+
+    def _sync_search_dense_batch(
+        self,
+        query_vectors: Sequence[Sequence[float]],
+        k: int,
+        kinds: set[NodeKind] | None,
+        *,
+        date_start: int | None = None,
+        date_end: int | None = None,
+    ) -> list[list[RetrievalMatch]]:
+        if not query_vectors:
+            return []
+
+        mode = self._paragraph_search_mode
+        main_batches = self._vector_store.search_batch(
+            self._vector_store.collection,
+            query_vectors,
+            k,
+            kinds,
+            date_start=date_start,
+            date_end=date_end,
+        )
+        if mode in {"full", "both"} and self._vector_store.para_full_collection is not None:
+            para_batches = self._vector_store.search_batch(
+                self._vector_store.para_full_collection,
+                query_vectors,
+                k,
+                kinds,
+                date_start=date_start,
+                date_end=date_end,
+            )
+            main_batches = [
+                main_hits + para_hits
+                for main_hits, para_hits in zip(main_batches, para_batches, strict=True)
+            ]
+
+        all_node_ids = {
+            node_id
+            for batch_hits in main_batches
+            for node_id, _ in batch_hits
+        }
+        rows = self._vector_store.fetch_nodes(list(all_node_ids))
+        return [
+            self._hits_to_matches(batch_hits, rows, limit=k)
+            for batch_hits in main_batches
+        ]
+
+    async def search_dense_batch(
+        self,
+        query_vectors: Sequence[Sequence[float]],
+        *,
+        k: int = 5,
+        kinds: set[NodeKind] | None = None,
+        date_range: tuple[int, int] | None = None,
+    ) -> list[list[RetrievalMatch]]:
+        date_start, date_end = date_range if date_range else (None, None)
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            self._executor,
+            partial(
+                self._sync_search_dense_batch,
+                query_vectors,
+                k,
+                kinds,
+                date_start=date_start,
+                date_end=date_end,
+            ),
+        )
+
+    def _sync_search_bm25_batch(
+        self,
+        query_texts: Sequence[str],
+        k: int,
+        kinds: set[NodeKind] | None,
+    ) -> list[list[RetrievalMatch]]:
+        if k <= 0 or not query_texts:
+            return [[] for _ in query_texts]
+
+        batch_hits = self._vector_store.search_bm25_batch(query_texts, k, kinds)
+        all_node_ids = {
+            node_id
+            for hits in batch_hits
+            for node_id, _ in hits
+        }
+        if not all_node_ids:
+            return [[] for _ in query_texts]
+
+        rows = self._vector_store.fetch_nodes(list(all_node_ids))
+        return [self._hits_to_matches(hits, rows) for hits in batch_hits]
+
+    async def search_bm25_batch(
+        self,
+        query_texts: Sequence[str],
+        *,
+        k: int = 5,
+        kinds: set[NodeKind] | None = None,
+    ) -> list[list[RetrievalMatch]]:
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            self._executor,
+            partial(self._sync_search_bm25_batch, query_texts, k, kinds),
         )
 
     async def search(
@@ -275,56 +413,126 @@ class MilvusPostgresNodeStore:
         parent_depth: int = 1,
         child_depth: int = 0,
     ) -> list[StoredNode]:
-        node = await self.get_node(node_id)
-        context: list[StoredNode] = [node]
+        contexts = await self.get_context_batch([(node_id, parent_depth, child_depth)])
+        return contexts[0] if contexts else []
 
-        if parent_depth > 0:
-            parent = node
-            for _ in range(parent_depth):
-                if parent.parent_id is None:
-                    break
-                parent = await self.get_node(parent.parent_id)
-                context.append(parent)
+    def _sync_get_context_batch(
+        self,
+        specs: Sequence[tuple[str, int, int]],
+    ) -> list[list[StoredNode]]:
+        if not specs:
+            return []
 
-        if child_depth > 0:
-            await self._collect_children(
-                node, depth=child_depth, accumulator=context, seen=set()
-            )
+        rows: dict[str, dict] = {}
+        root_ids = [node_id for node_id, _, _ in specs if node_id]
+        rows.update(self._vector_store.fetch_nodes(root_ids))
 
-        unique: list[StoredNode] = []
-        seen_ids: set[str] = set()
-        for item in context:
-            if item.node_id in seen_ids:
+        parent_ids: set[str] = set()
+        for node_id, parent_depth, _ in specs:
+            if parent_depth <= 0:
                 continue
-            seen_ids.add(item.node_id)
-            unique.append(item)
+            row = rows.get(node_id)
+            if row and row.get("parent_id"):
+                parent_ids.add(str(row["parent_id"]))
+        if parent_ids:
+            rows.update(self._vector_store.fetch_nodes(list(parent_ids)))
 
-        return unique
+        max_child_depth = max((child_depth for _, _, child_depth in specs), default=0)
+        if max_child_depth > 0:
+            frontier = {
+                child_id
+                for node_id, _, child_depth in specs
+                if child_depth > 0
+                for child_id in (rows.get(node_id) or {}).get("child_ids", [])
+                if child_id
+            }
+            for _ in range(max_child_depth):
+                missing = [node_id for node_id in frontier if node_id not in rows]
+                if not missing:
+                    break
+                rows.update(self._vector_store.fetch_nodes(missing))
+                next_frontier: set[str] = set()
+                for node_id in missing:
+                    row = rows.get(node_id)
+                    if not row:
+                        continue
+                    for child_id in row.get("child_ids", []) or []:
+                        if child_id and child_id not in rows:
+                            next_frontier.add(child_id)
+                frontier = next_frontier
 
-    async def _collect_children(
+        results: list[list[StoredNode]] = []
+        for node_id, parent_depth, child_depth in specs:
+            context: list[StoredNode] = []
+            row = rows.get(node_id)
+            if row is not None:
+                context.append(self._row_to_node(row))
+
+            if parent_depth > 0 and row is not None:
+                parent_id = row.get("parent_id")
+                parent_row = rows.get(parent_id) if parent_id else None
+                if parent_row is not None:
+                    context.append(self._row_to_node(parent_row))
+
+            if child_depth > 0 and row is not None:
+                self._append_child_context_sync(
+                    self._row_to_node(row),
+                    depth=child_depth,
+                    rows=rows,
+                    accumulator=context,
+                    seen={node.node_id for node in context},
+                )
+
+            unique: list[StoredNode] = []
+            seen_ids: set[str] = set()
+            for item in context:
+                if item.node_id in seen_ids:
+                    continue
+                seen_ids.add(item.node_id)
+                unique.append(item)
+            results.append(unique)
+        return results
+
+    def _append_child_context_sync(
         self,
         node: StoredNode,
         *,
         depth: int,
+        rows: dict[str, dict],
         accumulator: list[StoredNode],
         seen: set[str],
     ) -> None:
         if depth <= 0:
             return
-
         for child_id in node.child_ids:
             if child_id in seen:
                 continue
-
+            row = rows.get(child_id)
+            if row is None:
+                continue
             seen.add(child_id)
-            child = await self.get_node(child_id)
+            child = self._row_to_node(row)
             accumulator.append(child)
-            await self._collect_children(
+            self._append_child_context_sync(
                 child,
                 depth=depth - 1,
+                rows=rows,
                 accumulator=accumulator,
                 seen=seen,
             )
+
+    async def get_context_batch(
+        self,
+        specs: Sequence[tuple[str, int, int]],
+    ) -> list[list[StoredNode]]:
+        if not specs:
+            return []
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            self._executor,
+            self._sync_get_context_batch,
+            list(specs),
+        )
 
     # ------------------------------------------------------------------
     # Introspection

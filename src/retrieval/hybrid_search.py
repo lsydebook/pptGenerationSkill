@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Literal
 
@@ -218,12 +219,22 @@ async def execute_hybrid_search(
     )
 
     all_matches: list[RetrievalMatch] = []
-    for idx, (query_text, vector) in enumerate(zip(queries, query_vectors, strict=True), 1):
-        dense_hits = await store.search(vector.tolist(), k=k, kinds=search_kinds)
-        bm25_hits: list[RetrievalMatch] = []
-        if bm25_k > 0 and store.has_bm25_index():
-            bm25_hits = await store.search_bm25(query_text, k=bm25_k, kinds=search_kinds)
+    vectors = [vector.tolist() for vector in query_vectors]
+    use_bm25 = bm25_k > 0 and store.has_bm25_index()
 
+    if use_bm25:
+        dense_batches, bm25_batches = await asyncio.gather(
+            store.search_dense_batch(vectors, k=k, kinds=search_kinds),
+            store.search_bm25_batch(queries, k=bm25_k, kinds=search_kinds),
+        )
+    else:
+        dense_batches = await store.search_dense_batch(vectors, k=k, kinds=search_kinds)
+        bm25_batches = [[] for _ in queries]
+
+    for idx, (query_text, dense_hits, bm25_hits) in enumerate(
+        zip(queries, dense_batches, bm25_batches, strict=True),
+        1,
+    ):
         query_hits = merge_matches_keep_max_score(dense_hits + bm25_hits)
         all_matches.extend(query_hits)
 
@@ -239,7 +250,7 @@ async def execute_hybrid_search(
             len(queries),
             query_text[:80],
             dense_preview,
-            bm25_preview if bm25_k > 0 else "off",
+            bm25_preview if use_bm25 else "off",
             len(query_hits),
         )
     logger.info("step 3/5 hybrid_search done raw_matches=%s", len(all_matches))

@@ -452,6 +452,94 @@ class MilvusVectorStore:
             for hit in hits
         ]
 
+    def search_batch(
+        self,
+        collection_name: str | None,
+        query_vectors: Sequence[Sequence[float]],
+        k: int,
+        kinds: set[NodeKind] | None,
+        *,
+        date_start: int | None = None,
+        date_end: int | None = None,
+    ) -> list[list[tuple[str, float]]]:
+        if not collection_name or not query_vectors:
+            return [[] for _ in query_vectors]
+
+        filter_expr = self._build_expr(
+            kinds,
+            date_start=date_start,
+            date_end=date_end,
+        )
+        results = self._client.search(
+            collection_name=collection_name,
+            data=[_vector_to_list(vector) for vector in query_vectors],
+            anns_field="embedding",
+            search_params=self._build_search_params(),
+            limit=k,
+            filter=filter_expr or "",
+            output_fields=["node_id", "kind"],
+        )
+        batch_hits: list[list[tuple[str, float]]] = []
+        for hits in results:
+            batch_hits.append(
+                [
+                    (
+                        self._hit_node_id(hit),
+                        self._score_from_distance(self._hit_distance(hit)),
+                    )
+                    for hit in hits
+                ]
+            )
+        return batch_hits
+
+    def search_bm25_batch(
+        self,
+        query_texts: Sequence[str],
+        k: int,
+        kinds: set[NodeKind] | None,
+        *,
+        date_start: int | None = None,
+        date_end: int | None = None,
+    ) -> list[list[tuple[str, float]]]:
+        if k <= 0 or not query_texts:
+            return [[] for _ in query_texts]
+
+        filter_expr = self._build_expr(
+            kinds,
+            date_start=date_start,
+            date_end=date_end,
+        )
+        batch_data: list[str] = []
+        batch_indices: list[int] = []
+        for idx, query_text in enumerate(query_texts):
+            query = (query_text or "").strip()
+            if query:
+                batch_data.append(query)
+                batch_indices.append(idx)
+
+        per_query: list[list[tuple[str, float]]] = [[] for _ in query_texts]
+        if not batch_data:
+            return per_query
+
+        results = self._client.search(
+            collection_name=self._collection_name,
+            data=batch_data,
+            anns_field=BM25_SPARSE_FIELD,
+            search_params=BM25_SEARCH_PARAMS,
+            limit=k,
+            filter=filter_expr or "",
+            output_fields=["node_id", "kind"],
+        )
+        for result_idx, hits in enumerate(results):
+            orig_idx = batch_indices[result_idx]
+            raw_hits = [
+                (self._hit_node_id(hit), self._hit_distance(hit))
+                for hit in hits
+                if self._hit_node_id(hit)
+            ]
+            per_query[orig_idx] = normalize_bm25_top_k(raw_hits)
+        return per_query
+
     def search_bm25(
         self,
         query_text: str,

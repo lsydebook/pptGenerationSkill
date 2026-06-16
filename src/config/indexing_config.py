@@ -49,3 +49,5 @@ MILVUS_URI = get_env("MILVUS_URI")
 MILVUS_TOKEN = get_env("MILVUS_TOKEN")
 # Milvus 数据库名
 MILVUS_DB = get_env("MILVUS_DB", "default")
+# Milvus 同步 I/O 线程池大小（批量检索、上下文 fetch 等）
+MILVUS_IO_WORKERS = get_int("MILVUS_IO_WORKERS", 8)
