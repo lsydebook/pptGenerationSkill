@@ -2,7 +2,7 @@
 name = "pptGenerationSkill"
 version = "0.1.0"
 description = "Weekly report PPT generation skill"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.14"
 
 dependencies = [
     "fastapi>=0.110.0",
