@@ -1,0 +1,147 @@
+{
+  "meta": {
+    "title": "第20周科研周报 — EEG 睡眠分期研究",
+    "author": "李四",
+    "date": "2026-05-13",
+    "week_index": 20,
+    "lab": "脑机接口与智能计算实验室",
+    "audience": "lab_meeting"
+  },
+  "sections": [
+    {
+      "id": "sec_progress",
+      "title": "本周进展",
+      "kind": "progress",
+      "blocks": [
+        {
+          "type": "bullets",
+          "items": [
+            "完成 IMF-Attention 模型在 Sleep-EDF 数据集上的全量训练，Accuracy 达 83.9%",
+            "实现多通道 EEG 信号的 EMD 自适应分解模块，支持 3-6 层 IMF 分量提取",
+            "修复了跨层注意力 Dropout 在 FP16 模式下的 NaN 问题，引入梯度裁剪稳定训练",
+            "新增 4 组对比实验：Baseline CNN / DeepSleepNet / Transformer / Ours",
+            "编写 Sleep-EDF 数据预处理脚本，实现 30s 窗口滑动 + 通道标准化",
+            "搭建 WandB 实验追踪，记录所有超参与中间特征可视化"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sec_results",
+      "title": "实验结果",
+      "kind": "results",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "在 Sleep-EDF 数据集上与 Baseline CNN、DeepSleepNet、ViT-Sleep 进行了全面对比，结果如下方图表所示。"
+        },
+        {
+          "type": "image_ref",
+          "image_id": "img_accuracy",
+          "caption": "图1：各模型在 Sleep-EDF 上的训练曲线对比"
+        },
+        {
+          "type": "chart",
+          "kind": "bar",
+          "title": "Accuracy 对比",
+          "categories": ["Baseline CNN", "DeepSleepNet", "ViT-Sleep", "Ours (IMF-Attn)"],
+          "series": [
+            {"name": "Accuracy", "values": [78.2, 81.5, 80.3, 83.9]}
+          ],
+          "y_axis_title": "Accuracy (%)"
+        },
+        {
+          "type": "image_ref",
+          "image_id": "img_confusion",
+          "caption": "图2：Ours 模型混淆矩阵 — 各睡眠阶段识别准确度"
+        },
+        {
+          "type": "bullets",
+          "items": [
+            "Ours 相比 DeepSleepNet 提升 +2.4 Acc，且 N1 阶段（最难分类）提升 +8% 召回率",
+            "消融实验表明 IMF 分解贡献 +1.5%，跨注意力融合贡献 +2.1%",
+            "模型参数量 4.2M，较 ViT-Sleep (38M) 大幅压缩，适合边缘部署"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sec_research",
+      "title": "相关工作与架构设计",
+      "kind": "research",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "本周深入调研了 4 篇睡眠分期相关论文，重点关注多模态融合与注意力机制在生理信号中的应用。核心创新点：将 EMD 分解的 IMF 分量作为多尺度特征输入，通过跨注意力机制与原始 EEG 特征进行自适应融合。"
+        },
+        {
+          "type": "image_ref",
+          "image_id": "img_arch",
+          "caption": "图3：IMF-Attention 模型架构总览"
+        },
+        {
+          "type": "bullets",
+          "items": [
+            "EMD 分解将单通道 EEG 扩展为 3-6 个 IMF 分量，形成多尺度特征表示",
+            "跨注意力模块以原始特征为 Query，IMF 特征为 Key/Value 进行特征增强",
+            "相比传统 CNN，模型对 N1/REM 等难分类阶段的 F1 值提升显著",
+            "后续计划引入频域特征（PSD/DE）进一步增强频带信息"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sec_discussion",
+      "title": "问题与讨论",
+      "kind": "discussion",
+      "blocks": [
+        {
+          "type": "bullets",
+          "items": [
+            "跨受试者泛化：同一模型在 Fpz-Cz 通道表现最优，但其他通道准确率下降约 5%",
+            "N1 阶段样本严重不均衡（~8%），考虑用 Focal Loss 缓解",
+            "EMD 分解耗时较长（单样本 ~0.3s），可能影响实时推理",
+            "是否引入对比学习提升特征判别力？待与导师讨论"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sec_plan",
+      "title": "下周计划",
+      "kind": "plan",
+      "blocks": [
+        {
+          "type": "bullets",
+          "items": [
+            "完成跨受试者泛化实验，测试模型在不同通道下的稳定性",
+            "引入 Focal Loss + Class-Balanced Sampling 缓解 N1 不均衡",
+            "实现 EMD 快速算法（Kaiser-Teager 能量算子加速）",
+            "撰写论文 Method Section 初稿，目标 5 页",
+            "准备周五组会报告，整理实验对比表格与可视化"
+          ]
+        }
+      ]
+    }
+  ],
+  "images": [
+    {
+      "id": "img_accuracy",
+      "path": "examples/images/test_accuracy.png",
+      "caption": "各模型训练曲线对比",
+      "description": "横轴训练 epoch，纵轴验证集 Accuracy。Ours (蓝色) 全程高于其他基线。"
+    },
+    {
+      "id": "img_confusion",
+      "path": "examples/images/test_confusion.png",
+      "caption": "混淆矩阵",
+      "description": "Ours 模型在 Sleep-EDF 上的 5 分类混淆矩阵，对角线值均高于 0.65。"
+    },
+    {
+      "id": "img_arch",
+      "path": "examples/images/test_arch.png",
+      "caption": "IMF-Attention 模型架构",
+      "description": "多通道 EEG → ConvBlocks → IMF 分解 → Cross-Attention 融合 → 分类器。"
+    }
+  ]
+}

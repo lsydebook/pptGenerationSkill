@@ -1,0 +1,123 @@
+{
+  "meta": {
+    "title": "第20周科研周报 — LLM 长上下文压缩研究",
+    "author": "王五",
+    "date": "2026-05-13",
+    "week_index": 20,
+    "lab": "自然语言处理实验室",
+    "audience": "lab_meeting"
+  },
+  "sections": [
+    {
+      "id": "sec_progress",
+      "title": "本周进展",
+      "kind": "progress",
+      "blocks": [
+        {
+          "type": "bullets",
+          "items": [
+            "完成 Adaptive KV Cache 压缩算法的实现，支持动态阈值调节",
+            "在 LongBench 16 个子任务上完成 Baseline 对比实验",
+            "内存占用降低 21%，推理速度提升 1.8x，长文本 F1 仅下降 0.5%",
+            "编写端到端评测脚本，支持一键运行所有消融实验",
+            "修复 Attention Entropy 在 GQA 模式下的计算偏差",
+            "搭建 Weights & Biases 实验追踪面板，记录所有超参"
+          ]
+        },
+        {
+          "type": "text",
+          "text": "核心创新点：利用每层 Attention 的 Entropy 动态决定 KV Cache 的保留比例，而非统一丢弃。"
+        }
+      ]
+    },
+    {
+      "id": "sec_results",
+      "title": "实验结果",
+      "kind": "results",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "在 LongBench、Needle-in-a-Haystack、RULER 三个基准上评估了 Ours / Full Cache / H2O / StreamingLLM 四种方案。"
+        },
+        {
+          "type": "image_ref",
+          "image_id": "img_curve",
+          "caption": "图1：吞吐量与长文本 F1 随上下文长度变化"
+        },
+        {
+          "type": "chart",
+          "kind": "bar",
+          "title": "LongBench 综合 F1 对比",
+          "categories": ["Full Cache", "H2O", "StreamingLLM", "Ours"],
+          "series": [
+            {"name": "F1 Score", "values": [41.2, 39.8, 37.5, 40.8]}
+          ],
+          "y_axis_title": "F1 Score"
+        }
+      ]
+    },
+    {
+      "id": "sec_research",
+      "title": "相关工作与架构设计",
+      "kind": "research",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "本周深入调研了 H2O、StreamingLLM、SnapKV、Keyformer 四篇 KV Cache 压缩论文。我们的方法参考了 H2O 的 Accumulated Attention 思路，但引入了 Entropy 作为动态信号，而非静态累积分数。"
+        },
+        {
+          "type": "image_ref",
+          "image_id": "img_arch",
+          "caption": "图2：Adaptive KV Cache Selection 架构总览"
+        }
+      ]
+    },
+    {
+      "id": "sec_discussion",
+      "title": "问题与讨论",
+      "kind": "discussion",
+      "blocks": [
+        {
+          "type": "bullets",
+          "items": [
+            "Entropy 阈值需要针对不同任务微调，通用性有待提升",
+            "在 Needle-in-a-Haystack 极端场景下（深度 > 90%），召回率下降 4%",
+            "当前实现仅支持 Prefill 阶段压缩，Decode 阶段仍需全量 KV",
+            "与 FlashAttention 的兼容性需进一步验证"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sec_plan",
+      "title": "下周计划",
+      "kind": "plan",
+      "blocks": [
+        {
+          "type": "bullets",
+          "items": [
+            "完成 Decode 阶段的 KV Cache 增量压缩",
+            "在 Llama3-8B 和 Mistral-7B 上验证泛化性",
+            "撰写论文 Method + Experiment 章节初稿",
+            "准备组会报告，整理对比表格与可视化",
+            "与导师讨论 FlashAttention 兼容方案"
+          ]
+        }
+      ]
+    }
+  ],
+  "images": [
+    {
+      "id": "img_curve",
+      "path": "examples/images/curve.png",
+      "caption": "吞吐量与 F1 对比",
+      "description": "横轴上下文长度，纵轴吞吐量（左）/ F1（右）。Ours 在吞吐量接近 H2O 的同时保持更高 F1。"
+    },
+    {
+      "id": "img_arch",
+      "path": "examples/images/arch.png",
+      "caption": "模型架构图",
+      "description": "输入 Token → Attn Layers → Entropy 计算 → 动态阈值 τ(h) → Selective KV Drop → 压缩后的 KV Cache。"
+    }
+  ]
+}

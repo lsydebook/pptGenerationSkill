@@ -1,0 +1,45 @@
+[project]
+name = "weekly-report-ppt-agent"
+version = "0.2.0"
+description = "LangGraph + Qwen3.6 + python-pptx agent that generates academic weekly-report slides from upstream JSON."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "lx" }]
+license = { text = "MIT" }
+dependencies = [
+    "langgraph>=0.2.40",
+    "openai>=1.40.0",
+    "python-pptx>=1.0.0",
+    "pydantic>=2.7.0",
+    "pillow>=10.0.0",
+    "requests>=2.28.0",
+    "matplotlib>=3.7.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.6.0",
+]
+
+[project.scripts]
+weekly-ppt = "cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agent*", "tools*", "schemas*", "config*"]
+exclude = ["tests*", "examples*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v"

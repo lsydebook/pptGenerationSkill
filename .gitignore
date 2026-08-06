@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# 虚拟环境
+.env
+.venv/
+venv/
+env/
+
+# 构建
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# 测试 / lint 缓存
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+.ai_cache/
+
+# IDE / 编辑器
+.idea/
+.vscode/
+.trae/
+*.swp
+
+# 生成产物
+examples/output_*.pptx
+out/
+/*.pptx
+*.log

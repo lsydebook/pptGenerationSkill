@@ -1,0 +1,168 @@
+{
+  "meta": {
+    "title": "长上下文 LLM KV Cache 压缩 第18周进展",
+    "author": "李某",
+    "date": "2026-04-30",
+    "week_index": 18,
+    "lab": "智能语言处理实验室",
+    "audience": "lab_meeting",
+    "template_hint": "希望简洁现代风格，方便组会快速过"
+  },
+  "sections": [
+    {
+      "id": "sec_recap",
+      "title": "上周回顾",
+      "kind": "research",
+      "blocks": [
+        {
+          "type": "bullets",
+          "items": [
+            "完成 H2O 与 StreamingLLM 在 LongBench 上的复现，与论文 baseline 误差 < 1.2 点",
+            "搭建了 KV Cache 显存占用监控脚本，可逐层导出 attention 活跃度",
+            "组会反馈：希望聚焦推理阶段，先不动训练侧"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sec_progress",
+      "title": "本周进展",
+      "kind": "progress",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "围绕推理阶段的 KV Cache 选择性丢弃，本周完成了三件事。"
+        },
+        {
+          "type": "bullets",
+          "items": [
+            "提出基于 attention entropy 的动态阈值，相对固定窗口减少 21% 显存占用",
+            "在 Llama-3-8B 与 Qwen2-7B 上验证：32k 输入下 throughput 提升 1.4x",
+            "下游任务保持稳定：LongBench 平均下降仅 0.6 点（baseline 41.7 → 41.1）",
+            "新增 4 个单测覆盖边界 case：空 prompt / 超长 prompt / chunked decode / 流式输入"
+          ]
+        },
+        {
+          "type": "image_ref",
+          "image_id": "img_arch",
+          "caption": "图1：动态阈值 KV 选择架构"
+        }
+      ]
+    },
+    {
+      "id": "sec_results",
+      "title": "实验结果",
+      "kind": "results",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "在 LongBench-v2 与 NeedleInHaystack 两个基准上做了完整对比。"
+        },
+        {
+          "type": "image_ref",
+          "image_id": "img_curve",
+          "caption": "图2：随上下文长度的吞吐与精度"
+        },
+        {
+          "type": "chart",
+          "kind": "bar",
+          "title": "LongBench 各任务平均得分",
+          "categories": ["Single-Doc QA", "Multi-Doc QA", "Summ", "Few-shot", "Code"],
+          "series": [
+            {"name": "Full Cache", "values": [41.7, 38.2, 27.5, 65.3, 53.0]},
+            {"name": "H2O", "values": [40.1, 36.8, 26.4, 63.9, 51.7]},
+            {"name": "StreamingLLM", "values": [38.2, 35.0, 25.1, 62.3, 49.8]},
+            {"name": "Ours", "values": [41.1, 37.8, 27.2, 64.8, 52.3]}
+          ],
+          "y_axis_title": "F1 / Acc"
+        },
+        {
+          "type": "image_ref",
+          "image_id": "img_heatmap",
+          "caption": "图3：典型样本的 KV 保留分布（深色=保留）"
+        },
+        {
+          "type": "bullets",
+          "items": [
+            "压缩率 50% 时，平均下降 0.6 点，显著优于 H2O (-1.6) 与 StreamingLLM (-3.5)",
+            "NeedleInHaystack 32k：召回 96.3%，仅低于 Full Cache 1.1 点",
+            "首 token 延迟降低 18%，长输出场景吞吐 1.4x"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sec_research",
+      "title": "相关工作阅读",
+      "kind": "research",
+      "blocks": [
+        {
+          "type": "text",
+          "text": "本周精读 SnapKV (Li et al., 2024) 与 PyramidKV (Cai et al., 2024)。SnapKV 强调 prompt 阶段的一次性压缩，PyramidKV 则按层分配预算。两者都未考虑解码阶段的动态调整，是我们工作的差异点。"
+        },
+        {
+          "type": "image_ref",
+          "image_id": "img_compare",
+          "caption": "图4：与现有方法的设计空间对比"
+        }
+      ]
+    },
+    {
+      "id": "sec_problems",
+      "title": "遇到的问题",
+      "kind": "discussion",
+      "blocks": [
+        {
+          "type": "bullets",
+          "items": [
+            "Qwen2 在某些样本上 entropy 信号不稳定，正在尝试加滑动窗口平滑",
+            "vLLM 集成时 paged attention 需要重写 selector，工作量比预估多 1 周",
+            "LongBench Code 子任务对压缩特别敏感，下降 0.7，需要单独处理"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sec_plan",
+      "title": "下周计划",
+      "kind": "plan",
+      "blocks": [
+        {
+          "type": "bullets",
+          "items": [
+            "完成 vLLM 集成，跑通端到端 inference benchmark",
+            "增加 8B / 70B 两个尺度的实验，验证 scaling 行为",
+            "撰写 method 部分初稿（约 4 页），给 advisor 审阅",
+            "调研 Mooncake / SGLang 两个框架的 KV 管理方式，看是否有更轻量的集成路径"
+          ]
+        }
+      ]
+    }
+  ],
+  "images": [
+    {
+      "id": "img_arch",
+      "path": "examples/images/arch.png",
+      "caption": "动态阈值 KV 选择架构",
+      "description": "三层结构：底部为输入序列，中间为各层注意力分数计算 entropy，顶部根据 entropy 阈值丢弃低活跃 KV。"
+    },
+    {
+      "id": "img_curve",
+      "path": "examples/images/curve.png",
+      "caption": "上下文长度 vs 吞吐/精度",
+      "description": "横轴上下文长度（4k-32k），左纵轴吞吐量（tokens/s），右纵轴精度（F1）。Ours 曲线明显高于 baseline。"
+    },
+    {
+      "id": "img_heatmap",
+      "path": "examples/images/heatmap.png",
+      "caption": "KV 保留分布",
+      "description": "12 层 × 32 头的热力图，深色表示该位置 KV 被保留，浅色表示被丢弃。"
+    },
+    {
+      "id": "img_compare",
+      "path": "examples/images/compare.png",
+      "caption": "设计空间对比",
+      "description": "象限图：x 轴 prompt-aware vs decode-aware，y 轴 layer-uniform vs layer-adaptive。本工作位于右上角。"
+    }
+  ]
+}
