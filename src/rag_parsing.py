@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import tempfile
 from dataclasses import dataclass, field
@@ -219,6 +220,56 @@ def _safe_filename(filename: str) -> str:
     return os.path.basename(filename).strip() or "upload"
 
 
+def _content_hash(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()[:12]
+
+
+def document_id_for_bytes(data: bytes, filename: str) -> str:
+    """与入库相同的 id：文件名主干 + 内容 sha256 前 12 位。"""
+    safe_name = _safe_filename(filename)
+    stem = os.path.splitext(safe_name)[0] or safe_name
+    return f"{stem}-{_content_hash(data)}"
+
+
+def planned_document_ids(request: IndexingRequest) -> list[str]:
+    """本次请求将会写入的 document_id 列表（去重、保序）。"""
+    ids: list[str] = []
+    if request.file_data is not None:
+        ids.append(document_id_for_bytes(request.file_data, request.filename or "upload"))
+    text_value = (request.text or "").strip()
+    if text_value:
+        ids.append(document_id_for_bytes(text_value.encode("utf-8"), "input.txt"))
+    seen: set[str] = set()
+    unique: list[str] = []
+    for doc_id in ids:
+        if doc_id in seen:
+            continue
+        seen.add(doc_id)
+        unique.append(doc_id)
+    return unique
+
+
+async def existing_document_ids(doc_ids: list[str]) -> list[str]:
+    """返回已在 Milvus 中存在的 document_id（根节点 id 即 document_id）。"""
+    if not doc_ids:
+        return []
+    found = await get_datastore().get_nodes(doc_ids)
+    return [doc_id for doc_id in doc_ids if doc_id in found]
+
+
+def _report_metadata(
+    *,
+    content_type: str | None,
+    note: str | None,
+) -> dict[str, Any]:
+    payload_metadata: dict[str, Any] = {}
+    if content_type:
+        payload_metadata["content_type"] = content_type
+    if note:
+        payload_metadata["note"] = note
+    return payload_metadata
+
+
 def _bytes_to_payload(
     data: bytes,
     filename: str,
@@ -230,25 +281,25 @@ def _bytes_to_payload(
         raise IndexingError(f"unsupported file extension: {ext}", status_code=415)
 
     safe_name = _safe_filename(filename)
+    stem = os.path.splitext(safe_name)[0] or safe_name
+    doc_id = document_id_for_bytes(data, filename)
     with tempfile.TemporaryDirectory() as tmpdir:
         path = os.path.join(tmpdir, safe_name)
         with open(path, "wb") as handle:
             handle.write(data)
 
-        doc_id = os.path.splitext(safe_name)[0] or safe_name
-        payload_metadata: dict[str, Any] = {}
-        if content_type:
-            payload_metadata["content_type"] = content_type
-        if note:
-            payload_metadata["note"] = note
-
+        payload_metadata = _report_metadata(
+            content_type=content_type,
+            note=note,
+        )
         payload = parse_document_path(
             Path(path),
             doc_id=doc_id,
-            title=doc_id,
+            title=stem,
             metadata=payload_metadata,
         )
         payload.metadata.setdefault("source_filename", filename)
+        payload.metadata.setdefault("content_sha256_12", _content_hash(data))
         return payload
 
 
@@ -267,7 +318,11 @@ async def _parse_and_index_upload(
             len(data),
         )
         payload = await asyncio.to_thread(
-            _bytes_to_payload, data, filename, content_type, note
+            _bytes_to_payload,
+            data,
+            filename,
+            content_type,
+            note,
         )
         logger.info(
             "parse_and_index step 2/3 parse done doc_id=%s title=%s text_len=%s",

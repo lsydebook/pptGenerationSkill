@@ -19,6 +19,8 @@ from src.config.llm_config import (
 from src.config.logging_config import get_logger
 from src.cache.retrieval_cache import retrieval_cache
 from src.concurrency.priority import coordinator
+from src.config.retrieval_config import RETRIEVAL_BM25_TOP_K, RETRIEVAL_TOP_K
+from src.parsing.document_types import public_metadata
 from src.rag_parsing import get_datastore, get_embedder
 from src.retrieval.hybrid_search import RetrievalResult, execute_hybrid_search
 from src.retrieval.query_planner import LLMQueryPlanner, SimpleQueryPlanner
@@ -37,8 +39,6 @@ class RetrievalError(RuntimeError):
 @dataclass
 class RetrievalRequest:
     question: str
-    top_k: int | None = None
-    bm25_top_k: int | None = None
     use_planner: bool = True
 
 
@@ -50,16 +50,11 @@ class RetrievalResponse:
     snippets: list[dict[str, Any]] = field(default_factory=list)
 
 
-async def init_retrieval() -> None:
-    global _planner
-    if _planner is not None:
-        return
-
+def _build_planner_llm() -> dict:
     if not PLANNER_API_KEY:
         raise ValueError("PLANNER_API_KEY is required")
     if not PLANNER_BASE_URL:
         raise ValueError("PLANNER_BASE_URL is required")
-
     llm_kwargs: dict = {
         "model": PLANNER_MODEL,
         "api_key": PLANNER_API_KEY,
@@ -70,13 +65,24 @@ async def init_retrieval() -> None:
     if PLANNER_MAX_TOKENS:
         llm_kwargs["max_tokens"] = int(PLANNER_MAX_TOKENS)
     if not PLANNER_ENABLE_THINKING:
-        # BUPT qwen-latest 网关需通过 chat_template_kwargs 关闭思考链；
-        # 仅传 enable_thinking 会仍生成大量 reasoning token，导致 10s+ 延迟。
         llm_kwargs["extra_body"] = {
             "chat_template_kwargs": {"enable_thinking": False},
         }
+    return llm_kwargs
 
-    planner_llm = ChatOpenAI(**llm_kwargs)
+
+def get_planner() -> LLMQueryPlanner:
+    if _planner is None:
+        raise RetrievalError("Retrieval pipeline not initialized", status_code=500)
+    return _planner
+
+
+async def init_retrieval() -> None:
+    global _planner
+    if _planner is not None:
+        return
+
+    planner_llm = ChatOpenAI(**_build_planner_llm())
     _planner = LLMQueryPlanner(llm=planner_llm, max_queries=PLANNER_MAX_QUERIES)
     logger.info("init retrieval done planner_model=%s max_queries=%s", PLANNER_MODEL, PLANNER_MAX_QUERIES)
 
@@ -93,7 +99,7 @@ def _match_to_dict(match) -> dict[str, Any]:
         "kind": node.kind.value,
         "text": node.text,
         "score": match.score,
-        "metadata": node.metadata,
+        "metadata": public_metadata(node.metadata),
     }
 
 
@@ -104,7 +110,7 @@ def _snippet_to_dict(snippet) -> dict[str, Any]:
         "text": snippet.text,
         "score": snippet.score,
         "rank": snippet.rank,
-        "metadata": snippet.metadata,
+        "metadata": public_metadata(snippet.metadata),
     }
 
 
@@ -119,8 +125,8 @@ async def run_retrieval(request: RetrievalRequest) -> RetrievalResponse:
         "run_retrieval start question_len=%s use_planner=%s top_k=%s bm25_top_k=%s cache=%s",
         len(question),
         request.use_planner,
-        request.top_k,
-        request.bm25_top_k,
+        RETRIEVAL_TOP_K,
+        RETRIEVAL_BM25_TOP_K,
         retrieval_cache.enabled,
     )
 
@@ -154,8 +160,6 @@ async def run_retrieval(request: RetrievalRequest) -> RetrievalResponse:
                 queries,
                 store=get_datastore(),
                 embedder=get_embedder(),
-                top_k=request.top_k,
-                bm25_top_k=request.bm25_top_k,
             )
     except Exception as exc:  # noqa: BLE001
         logger.exception("run_retrieval failed question=%r", question[:200])

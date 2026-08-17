@@ -1,8 +1,13 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 
 from src.api.http_schemas import (
+    AnswerRequest,
+    AnswerResponse,
+    ContextSnippetOut,
     IndexingSummary,
     JobResultSummary,
     JobStatusResponse,
@@ -14,10 +19,13 @@ from src.cache.redis_client import close_redis, get_redis, init_redis
 from src.concurrency.priority import coordinator
 from src.config.logging_config import get_logger, setup_logging
 from src.jobs.ingestion_queue import JobStatus, ingestion_jobs
+from src.rag_answer import init_answer, run_answer, shutdown_answer
 from src.rag_parsing import (
     IndexingError,
     IndexingRequest,
+    existing_document_ids,
     init_parsing,
+    planned_document_ids,
     shutdown_parsing,
     validate_indexing_request,
 )
@@ -61,11 +69,13 @@ async def lifespan(_app: FastAPI):
     await init_redis()
     await init_parsing()
     await init_retrieval()
+    init_answer()
     await ingestion_jobs.start()
     logger.info("application ready")
     yield
     logger.info("application shutdown")
     await ingestion_jobs.stop()
+    shutdown_answer()
     shutdown_retrieval()
     shutdown_parsing()
     await close_redis()
@@ -93,13 +103,16 @@ def create_app() -> FastAPI:
     @app.post(
         "/v1/parse",
         response_model=ParseJobAccepted,
-        status_code=status.HTTP_202_ACCEPTED,
+        responses={
+            200: {"description": "文档已在 RAG 中，未重新入库"},
+            202: {"description": "已接受，请轮询 poll_url"},
+        },
     )
     async def parse_file(
         file: UploadFile | None = File(default=None),
         text: str | None = Form(default=None),
         note: str | None = Form(default=None),
-    ) -> ParseJobAccepted:
+    ) -> JSONResponse:
         file_data = await file.read() if file is not None else None
         request = IndexingRequest(
             file_data=file_data,
@@ -115,18 +128,42 @@ def create_app() -> FastAPI:
         )
         try:
             filename_hint = validate_indexing_request(request)
+            doc_ids = planned_document_ids(request)
+            already = await existing_document_ids(doc_ids)
+            if doc_ids and len(already) == len(doc_ids):
+                logger.info(
+                    "POST /v1/parse already_in_rag filename=%s document_ids=%s",
+                    filename_hint,
+                    already,
+                )
+                payload = ParseJobAccepted(
+                    status="already_indexed",
+                    filename=filename_hint,
+                    already_in_rag=True,
+                    message="该文档已在 RAG 中",
+                    document_ids=already,
+                )
+                return JSONResponse(
+                    status_code=status.HTTP_200_OK,
+                    content=jsonable_encoder(payload),
+                )
             job_id = await ingestion_jobs.enqueue(request, filename_hint=filename_hint)
         except IndexingError as exc:
             logger.warning("indexing rejected: %s", exc)
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
         job = await ingestion_jobs.get_job(job_id)
-        return ParseJobAccepted(
+        payload = ParseJobAccepted(
             job_id=job_id,
             status=JobStatus.PENDING.value,
             poll_url=f"/v1/jobs/{job_id}",
             filename=filename_hint,
             queue_position=job.get("queue_position") if job else None,
+            document_ids=doc_ids,
+        )
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content=jsonable_encoder(payload),
         )
 
     @app.get("/v1/jobs/{job_id}", response_model=JobStatusResponse)
@@ -139,18 +176,14 @@ def create_app() -> FastAPI:
     @app.post("/v1/retrieve", response_model=RetrieveResponse)
     async def retrieve(body: RetrieveRequest) -> RetrieveResponse:
         logger.info(
-            "POST /v1/retrieve question_len=%s use_planner=%s top_k=%s bm25_top_k=%s",
+            "POST /v1/retrieve question_len=%s use_planner=%s",
             len(body.question),
             body.use_planner,
-            body.top_k,
-            body.bm25_top_k,
         )
         try:
             result = await run_retrieval(
                 RetrievalRequest(
                     question=body.question,
-                    top_k=body.top_k,
-                    bm25_top_k=body.bm25_top_k,
                     use_planner=body.use_planner,
                 )
             )
@@ -165,5 +198,38 @@ def create_app() -> FastAPI:
             len(result.snippets),
         )
         return RetrieveResponse(**result.__dict__)
+
+    @app.post("/v1/answer", response_model=AnswerResponse)
+    async def answer(body: AnswerRequest) -> AnswerResponse:
+        logger.info(
+            "POST /v1/answer question_len=%s use_planner=%s",
+            len(body.question),
+            body.use_planner,
+        )
+        try:
+            from src.rag_answer import AnswerRequest as AnswerRunRequest
+
+            result = await run_answer(
+                AnswerRunRequest(
+                    question=body.question,
+                    use_planner=body.use_planner,
+                )
+            )
+        except RetrievalError as exc:
+            logger.warning("answer failed: %s", exc)
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+        return AnswerResponse(
+            question=result.question,
+            answer=result.answer,
+            answer_value=result.answer_value,
+            is_blank=result.is_blank,
+            ref_ids=result.ref_ids,
+            explanation=result.explanation,
+            queries=result.queries,
+            snippets=[ContextSnippetOut(**item) for item in result.snippets],
+            retries=result.retries,
+            ensemble_size=result.ensemble_size,
+        )
 
     return app

@@ -7,7 +7,7 @@ import json
 from typing import Any, Protocol
 
 from src.config.indexing_config import RAG_VEC_COLLECTION_SUFFIX
-from src.config.llm_config import EMBEDDING_MODEL
+from src.config.llm_config import EMBEDDING_MODEL, RERANK_ENABLED, RERANK_MODEL, RERANK_TOP_N
 from src.config.logging_config import get_logger
 from src.config.redis_config import (
     RAG_CACHE_ENABLED,
@@ -18,9 +18,15 @@ from src.config.redis_config import (
 from src.config.retrieval_config import (
     CHILD_DEPTH,
     DEDUPLICATE_RETRIEVAL,
+    INCLUDE_SIBLINGS,
+    MAX_SIBLINGS,
     PARENT_DEPTH,
     RERANK_STRATEGY,
+    RETRIEVAL_BM25_TOP_K,
+    RETRIEVAL_TOP_K,
     SNIPPET_DEDUP,
+    SNIPPET_RETURN_MODE,
+    STITCH_MAX_GAP,
     TOP_K_FINAL,
 )
 from src.cache.redis_client import get_redis
@@ -30,8 +36,6 @@ logger = get_logger(__name__)
 
 class _CacheableRetrievalRequest(Protocol):
     question: str
-    top_k: int | None
-    bm25_top_k: int | None
     use_planner: bool
 
 
@@ -43,12 +47,25 @@ def _static_cache_fingerprint() -> dict[str, Any]:
     return {
         "rerank": RERANK_STRATEGY,
         "top_k_final": TOP_K_FINAL,
+        "retrieval_top_k": RETRIEVAL_TOP_K,
+        "bm25_top_k": RETRIEVAL_BM25_TOP_K,
         "parent_depth": PARENT_DEPTH,
         "child_depth": CHILD_DEPTH,
         "snippet_dedup": SNIPPET_DEDUP,
         "dedup": DEDUPLICATE_RETRIEVAL,
+        "snippet_return": SNIPPET_RETURN_MODE,
+        "siblings": INCLUDE_SIBLINGS,
+        "neural_rerank": RERANK_ENABLED,
+        "rerank_model": RERANK_MODEL,
+        "rerank_top_n": RERANK_TOP_N,
+        "max_siblings": MAX_SIBLINGS,
+        "expand_before_rerank": True,
+        "stitch_consecutive": True,
+        "stitch_max_gap": STITCH_MAX_GAP,
         "collection": RAG_VEC_COLLECTION_SUFFIX,
         "embedding": EMBEDDING_MODEL,
+        "api_meta": "no_full_emb",
+        "snippet_parent": "sentence_only",
     }
 
 
@@ -86,8 +103,6 @@ class RetrievalCache:
     async def build_key(self, request: _CacheableRetrievalRequest) -> str:
         version = await self._ensure_version()
         params = {
-            "top_k": request.top_k,
-            "bm25_top_k": request.bm25_top_k,
             "use_planner": request.use_planner,
             "cfg": _static_cache_fingerprint(),
         }

@@ -21,11 +21,14 @@ class ParseResponse(BaseModel):
 
 
 class ParseJobAccepted(BaseModel):
-    job_id: str
+    job_id: str | None = None
     status: str = "pending"
-    poll_url: str
+    poll_url: str | None = None
     filename: str | None = None
     queue_position: int | None = None
+    already_in_rag: bool = False
+    message: str | None = None
+    document_ids: list[str] = Field(default_factory=list)
 
 
 class JobResultSummary(BaseModel):
@@ -48,24 +51,11 @@ class JobStatusResponse(BaseModel):
 
 class RetrieveRequest(BaseModel):
     question: str
-    top_k: int | None = Field(
-        default=None,
-        description=(
-            "每条检索 query 的 Dense 向量召回数量；不传则用 .env 的 RETRIEVAL_TOP_K（默认 8）"
-        ),
-    )
-    bm25_top_k: int | None = Field(
-        default=None,
-        description=(
-            "每条检索 query 的 BM25 关键词召回数量；0 表示关闭 BM25；"
-            "不传则用 .env 的 RETRIEVAL_BM25_TOP_K（默认 4）"
-        ),
-    )
     use_planner: bool = Field(
         default=True,
         description=(
             "是否用 LLM 将用户问题扩写成多条检索 query。"
-            "true：扩写后分别做 Dense+BM25 再合并重排；"
+            "true：扩写后分别做 Dense+BM25 再融合；"
             "false：仅用原始 question 检索一次"
         ),
     )
@@ -93,3 +83,20 @@ class RetrieveResponse(BaseModel):
     queries: list[str]
     matches: list[RetrievalMatchOut]
     snippets: list[ContextSnippetOut]
+
+
+class AnswerRequest(RetrieveRequest):
+    """与检索相同入参；生成策略由 .env 的 ANSWER_* 决定。"""
+
+
+class AnswerResponse(BaseModel):
+    question: str
+    answer: str
+    answer_value: str = ""
+    is_blank: bool = False
+    ref_ids: list[str] = Field(default_factory=list)
+    explanation: str = ""
+    queries: list[str] = Field(default_factory=list)
+    snippets: list[ContextSnippetOut] = Field(default_factory=list)
+    retries: int = 0
+    ensemble_size: int = 1

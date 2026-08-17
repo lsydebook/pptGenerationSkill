@@ -16,13 +16,34 @@ from typing import Literal, Sequence
 import src.config.env_loader  # noqa: F401  # 加载 .env
 from src.config.indexing_config import MILVUS_IO_WORKERS
 from src.config.logging_config import get_logger
-from src.parsing.document_types import NodeKind, RetrievalMatch, StoredNode
+from src.config.retrieval_config import MAX_SIBLINGS
+from src.parsing.document_types import NodeKind, RetrievalMatch, StoredNode, public_metadata
 
 from .milvus_vector_store import MilvusVectorStore
 
 logger = get_logger(__name__)
 
 ParagraphSearchMode = Literal["averaged", "full", "both"]
+
+
+def _nearby_sibling_ids(
+    child_ids: Sequence[object],
+    node_id: str,
+    max_siblings: int,
+) -> list[str]:
+    """取命中节点在 child_ids 中前后邻近的兄弟，而不是整节所有子节点。"""
+    children = [str(child_id) for child_id in child_ids if child_id]
+    if not children or max_siblings <= 0:
+        return []
+    try:
+        index = children.index(node_id)
+    except ValueError:
+        return children[:max_siblings]
+    half = max(1, max_siblings // 2)
+    start = max(0, index - half)
+    end = min(len(children), index + half + 1)
+    nearby = [child_id for child_id in children[start:end] if child_id != node_id]
+    return nearby[:max_siblings]
 
 
 class MilvusPostgresNodeStore:
@@ -123,7 +144,7 @@ class MilvusPostgresNodeStore:
                 embedding = embedding.tolist()
             vector = [float(x) for x in embedding]
         else:
-            vector = [0.0] * self._dimensions
+            vector = []
 
         return StoredNode(
             node_id=row["node_id"],
@@ -131,7 +152,7 @@ class MilvusPostgresNodeStore:
             kind=NodeKind(row["kind"]),
             title=row["title"],
             text=row["text"],
-            metadata=row.get("metadata", {}),
+            metadata=public_metadata(row.get("metadata") or {}),
             embedding=vector,
             child_ids=list(row.get("child_ids", [])),
             created_at=row.get("created_at", 0) or 0,
@@ -170,12 +191,14 @@ class MilvusPostgresNodeStore:
         *,
         date_start: int | None = None,
         date_end: int | None = None,
+        metadata_filter: dict[str, str] | None = None,
     ) -> list[tuple[str, float]]:
         if collection is None:
             return []
         return self._vector_store.search(
             collection, query_vector, k, kinds,
             date_start=date_start, date_end=date_end,
+            metadata_filter=metadata_filter,
         )
 
     def _hits_to_matches(
@@ -210,6 +233,7 @@ class MilvusPostgresNodeStore:
         *,
         date_start: int | None = None,
         date_end: int | None = None,
+        metadata_filter: dict[str, str] | None = None,
     ) -> list[list[RetrievalMatch]]:
         if not query_vectors:
             return []
@@ -222,6 +246,7 @@ class MilvusPostgresNodeStore:
             kinds,
             date_start=date_start,
             date_end=date_end,
+            metadata_filter=metadata_filter,
         )
         if mode in {"full", "both"} and self._vector_store.para_full_collection is not None:
             para_batches = self._vector_store.search_batch(
@@ -231,6 +256,7 @@ class MilvusPostgresNodeStore:
                 kinds,
                 date_start=date_start,
                 date_end=date_end,
+                metadata_filter=metadata_filter,
             )
             main_batches = [
                 main_hits + para_hits
@@ -255,6 +281,7 @@ class MilvusPostgresNodeStore:
         k: int = 5,
         kinds: set[NodeKind] | None = None,
         date_range: tuple[int, int] | None = None,
+        metadata_filter: dict[str, str] | None = None,
     ) -> list[list[RetrievalMatch]]:
         date_start, date_end = date_range if date_range else (None, None)
         loop = asyncio.get_event_loop()
@@ -267,6 +294,7 @@ class MilvusPostgresNodeStore:
                 kinds,
                 date_start=date_start,
                 date_end=date_end,
+                metadata_filter=metadata_filter,
             ),
         )
 
@@ -275,11 +303,14 @@ class MilvusPostgresNodeStore:
         query_texts: Sequence[str],
         k: int,
         kinds: set[NodeKind] | None,
+        metadata_filter: dict[str, str] | None = None,
     ) -> list[list[RetrievalMatch]]:
         if k <= 0 or not query_texts:
             return [[] for _ in query_texts]
 
-        batch_hits = self._vector_store.search_bm25_batch(query_texts, k, kinds)
+        batch_hits = self._vector_store.search_bm25_batch(
+            query_texts, k, kinds, metadata_filter=metadata_filter
+        )
         all_node_ids = {
             node_id
             for hits in batch_hits
@@ -297,11 +328,18 @@ class MilvusPostgresNodeStore:
         *,
         k: int = 5,
         kinds: set[NodeKind] | None = None,
+        metadata_filter: dict[str, str] | None = None,
     ) -> list[list[RetrievalMatch]]:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
             self._executor,
-            partial(self._sync_search_bm25_batch, query_texts, k, kinds),
+            partial(
+                self._sync_search_bm25_batch,
+                query_texts,
+                k,
+                kinds,
+                metadata_filter,
+            ),
         )
 
     async def search(
@@ -419,6 +457,8 @@ class MilvusPostgresNodeStore:
     def _sync_get_context_batch(
         self,
         specs: Sequence[tuple[str, int, int]],
+        *,
+        include_siblings: bool = False,
     ) -> list[list[StoredNode]]:
         if not specs:
             return []
@@ -429,13 +469,31 @@ class MilvusPostgresNodeStore:
 
         parent_ids: set[str] = set()
         for node_id, parent_depth, _ in specs:
-            if parent_depth <= 0:
+            if parent_depth <= 0 and not include_siblings:
                 continue
             row = rows.get(node_id)
             if row and row.get("parent_id"):
                 parent_ids.add(str(row["parent_id"]))
         if parent_ids:
             rows.update(self._vector_store.fetch_nodes(list(parent_ids)))
+
+        sibling_ids: set[str] = set()
+        if include_siblings:
+            for node_id, _, _ in specs:
+                row = rows.get(node_id)
+                parent_id = (row or {}).get("parent_id")
+                parent_row = rows.get(parent_id) if parent_id else None
+                if not parent_row:
+                    continue
+                for child_id in _nearby_sibling_ids(
+                    parent_row.get("child_ids", []) or [],
+                    node_id,
+                    MAX_SIBLINGS,
+                ):
+                    if child_id not in rows:
+                        sibling_ids.add(child_id)
+            if sibling_ids:
+                rows.update(self._vector_store.fetch_nodes(list(sibling_ids)))
 
         max_child_depth = max((child_depth for _, _, child_depth in specs), default=0)
         if max_child_depth > 0:
@@ -483,6 +541,19 @@ class MilvusPostgresNodeStore:
                     seen={node.node_id for node in context},
                 )
 
+            if include_siblings and row is not None:
+                parent_id = row.get("parent_id")
+                parent_row = rows.get(parent_id) if parent_id else None
+                if parent_row is not None:
+                    for child_id in _nearby_sibling_ids(
+                        parent_row.get("child_ids", []) or [],
+                        node_id,
+                        MAX_SIBLINGS,
+                    ):
+                        sibling_row = rows.get(child_id)
+                        if sibling_row is not None:
+                            context.append(self._row_to_node(sibling_row))
+
             unique: list[StoredNode] = []
             seen_ids: set[str] = set()
             for item in context:
@@ -524,14 +595,19 @@ class MilvusPostgresNodeStore:
     async def get_context_batch(
         self,
         specs: Sequence[tuple[str, int, int]],
+        *,
+        include_siblings: bool = False,
     ) -> list[list[StoredNode]]:
         if not specs:
             return []
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
             self._executor,
-            self._sync_get_context_batch,
-            list(specs),
+            partial(
+                self._sync_get_context_batch,
+                list(specs),
+                include_siblings=include_siblings,
+            ),
         )
 
     # ------------------------------------------------------------------

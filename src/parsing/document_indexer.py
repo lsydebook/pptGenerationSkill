@@ -9,7 +9,12 @@ from typing import Iterable, Literal, Sequence
 import numpy as np
 
 from src.config.embedding import EmbeddingModel
-from src.config.indexing_config import DOCUMENT_SUMMARY_MAX_CHARS
+from src.config.indexing_config import (
+    DOCUMENT_SUMMARY_MAX_CHARS,
+    MAX_PARAGRAPH_CHARS,
+    MAX_SENTENCE_CHARS,
+    SECTION_SUMMARY_MAX_CHARS,
+)
 from src.parsing.document_payload_builder import text_to_payload
 from src.parsing.document_types import (
     DocumentPayload,
@@ -22,8 +27,11 @@ from src.parsing.document_types import (
 )
 from src.parsing.text_splitter import (
     build_document_summary,
+    pack_texts,
+    split_by_limit,
     split_paragraphs,
     split_sentences,
+    split_to_max_chars,
 )
 from src.config.logging_config import get_logger
 from src.storage.milvus_rag_node_store import MilvusPostgresNodeStore
@@ -50,6 +58,54 @@ def _paragraph_payload_from_text(text: str) -> ParagraphPayload:
         text=text,
         sentences=_sentence_payloads_from_text(text),
     )
+
+
+_ATOMIC_BLOCKS = {"code", "table_row", "image"}
+
+
+def expand_paragraph_payload(paragraph: ParagraphPayload) -> list[ParagraphPayload]:
+    """超长段落切成多个节点，避免整篇论文作为一段送入 embedding。"""
+    text = (paragraph.text or "").strip()
+    if not text:
+        return [paragraph]
+
+    block_type = paragraph.metadata.get("block_type", "paragraph")
+    atomic = block_type in _ATOMIC_BLOCKS
+    sentences = paragraph.sentences or []
+    within_para = len(text) <= MAX_PARAGRAPH_CHARS
+    within_sents = all(len(item.text or "") <= MAX_SENTENCE_CHARS for item in sentences)
+    if within_para and (atomic or within_sents):
+        return [paragraph]
+
+    if atomic:
+        pieces = split_by_limit(text, MAX_PARAGRAPH_CHARS)
+    else:
+        raw_sents = [item.text for item in sentences if (item.text or "").strip()]
+        if not raw_sents:
+            raw_sents = split_sentences(text, min_chars=0) or [text]
+        capped: list[str] = []
+        for sent in raw_sents:
+            capped.extend(split_to_max_chars(sent, MAX_SENTENCE_CHARS) or [sent])
+        pieces = pack_texts(capped, MAX_PARAGRAPH_CHARS)
+
+    if len(pieces) <= 1 and pieces and pieces[0] == text:
+        return [paragraph]
+
+    expanded: list[ParagraphPayload] = []
+    total = len(pieces)
+    for index, piece in enumerate(pieces, start=1):
+        meta = dict(paragraph.metadata)
+        if total > 1:
+            meta["split_index"] = index
+            meta["split_total"] = total
+        if atomic:
+            piece_sents = [SentencePayload(text=piece)] if piece else []
+        else:
+            piece_sents = _sentence_payloads_from_text(piece)
+        expanded.append(
+            ParagraphPayload(text=piece, sentences=piece_sents or None, metadata=meta)
+        )
+    return expanded or [paragraph]
 
 
 def _sections_from_text(document: DocumentPayload) -> list[SectionPayload]:
@@ -106,64 +162,76 @@ class DocumentTreeBuilder:
                     "section_index": counters["section"],
                 }
             )
+            _copy_report_fields(document.metadata, section_meta)
+            section_body = "\n\n".join(
+                paragraph.text for paragraph in section.paragraphs if paragraph.text
+            )
+            section_text = build_document_summary(
+                section.title,
+                section_body,
+                max_chars=SECTION_SUMMARY_MAX_CHARS,
+            )
             section_node = TreeNode(
                 node_id=section_id,
                 parent_id=root.node_id,
                 kind=NodeKind.SECTION,
                 title=section.title,
-                text=section.title,
+                text=section_text or section.title,
                 metadata=section_meta,
             )
             root.children.append(section_node)
 
             for paragraph in section.paragraphs:
-                counters["paragraph"] += 1
-                paragraph_id = f"{section_id}:p{counters['paragraph']}"
-                paragraph_meta = dict(paragraph.metadata)
-                paragraph_meta.update(
-                    {
-                        "document_id": document.document_id,
-                        "document_title": document.title,
-                        "section_id": section_id,
-                        "section_index": counters["section"],
-                        "paragraph_index": counters["paragraph"],
-                    }
-                )
-                paragraph_node = TreeNode(
-                    node_id=paragraph_id,
-                    parent_id=section_id,
-                    kind=NodeKind.PARAGRAPH,
-                    title=section.title,
-                    text=paragraph.text,
-                    metadata=paragraph_meta,
-                )
-                section_node.children.append(paragraph_node)
-
-                sentences = paragraph.sentences or _sentence_payloads_from_text(
-                    paragraph.text
-                )
-                for sentence in sentences:
-                    counters["sentence"] += 1
-                    sentence_id = f"{paragraph_id}:s{counters['sentence']}"
-                    sentence_meta = dict(sentence.metadata)
-                    sentence_meta.update(
+                for part in expand_paragraph_payload(paragraph):
+                    counters["paragraph"] += 1
+                    paragraph_id = f"{section_id}:p{counters['paragraph']}"
+                    paragraph_meta = dict(part.metadata)
+                    paragraph_meta.update(
                         {
                             "document_id": document.document_id,
                             "document_title": document.title,
                             "section_id": section_id,
-                            "paragraph_id": paragraph_id,
-                            "sentence_index": counters["sentence"],
+                            "section_index": counters["section"],
+                            "paragraph_index": counters["paragraph"],
                         }
                     )
-                    sentence_node = TreeNode(
-                        node_id=sentence_id,
-                        parent_id=paragraph_id,
-                        kind=NodeKind.SENTENCE,
+                    _copy_report_fields(document.metadata, paragraph_meta)
+                    paragraph_node = TreeNode(
+                        node_id=paragraph_id,
+                        parent_id=section_id,
+                        kind=NodeKind.PARAGRAPH,
                         title=section.title,
-                        text=sentence.text,
-                        metadata=sentence_meta,
+                        text=part.text,
+                        metadata=paragraph_meta,
                     )
-                    paragraph_node.children.append(sentence_node)
+                    section_node.children.append(paragraph_node)
+
+                    sentences = part.sentences or _sentence_payloads_from_text(
+                        part.text
+                    )
+                    for sentence in sentences:
+                        counters["sentence"] += 1
+                        sentence_id = f"{paragraph_id}:s{counters['sentence']}"
+                        sentence_meta = dict(sentence.metadata)
+                        sentence_meta.update(
+                            {
+                                "document_id": document.document_id,
+                                "document_title": document.title,
+                                "section_id": section_id,
+                                "paragraph_id": paragraph_id,
+                                "sentence_index": counters["sentence"],
+                            }
+                        )
+                        _copy_report_fields(document.metadata, sentence_meta)
+                        sentence_node = TreeNode(
+                            node_id=sentence_id,
+                            parent_id=paragraph_id,
+                            kind=NodeKind.SENTENCE,
+                            title=section.title,
+                            text=sentence.text,
+                            metadata=sentence_meta,
+                        )
+                        paragraph_node.children.append(sentence_node)
 
         return root
 
@@ -179,11 +247,34 @@ def _normalize_vectors(vectors: np.ndarray) -> np.ndarray:
     return vectors / norms
 
 
-def average_embeddings(child_vectors: Sequence[np.ndarray]) -> np.ndarray:
+def average_embeddings(
+    child_vectors: Sequence[np.ndarray],
+    weights: Sequence[float] | None = None,
+) -> np.ndarray:
+    """KohakuRAG 底向上聚合：默认按子节点文本长度加权。"""
     if not child_vectors:
         raise ValueError("average_embeddings requires at least one child vector.")
     stacked = np.vstack(child_vectors)
-    return _normalize_vectors(np.mean(stacked, axis=0, keepdims=True))[0]
+    if weights is None:
+        weight_arr = np.ones(len(child_vectors), dtype=np.float64)
+    else:
+        if len(weights) != len(child_vectors):
+            raise ValueError("weights length must match child_vectors")
+        weight_arr = np.asarray(weights, dtype=np.float64)
+        weight_arr = np.maximum(weight_arr, 1.0)
+    weight_arr = weight_arr / weight_arr.sum()
+    averaged = np.average(stacked, axis=0, weights=weight_arr)
+    return _normalize_vectors(np.asarray(averaged, dtype=np.float64).reshape(1, -1))[0]
+
+
+REPORT_METADATA_KEYS = ("note",)
+
+
+def _copy_report_fields(source: dict, target: dict) -> None:
+    for key in REPORT_METADATA_KEYS:
+        value = source.get(key)
+        if value:
+            target[key] = value
 
 
 def documents_from_payload(payload: DocumentPayload) -> list[dict]:
@@ -331,7 +422,8 @@ class DocumentIndexer:
         if not child_vectors:
             raise ValueError(f"Node {node.node_id} is missing an embedding.")
 
-        averaged_embedding = average_embeddings(child_vectors)
+        child_weights = [max(len(child.text or ""), 1) for child in node.children]
+        averaged_embedding = average_embeddings(child_vectors, child_weights)
         if node.kind == NodeKind.PARAGRAPH and node.node_id in para_full_map:
             full_embedding = para_full_map[node.node_id]
             if self._paragraph_embedding_mode == "full":

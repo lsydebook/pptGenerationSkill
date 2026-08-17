@@ -8,7 +8,7 @@ from pymilvus import CollectionSchema, DataType, FieldSchema, Function, Function
 from pymilvus.milvus_client import IndexParams
 
 from src.config.indexing_config import MILVUS_BM25_ANALYZER, RAG_VEC_COLLECTION_SUFFIX
-from src.parsing.document_types import NodeKind, StoredNode
+from src.parsing.document_types import NodeKind, StoredNode, public_metadata
 from src.storage.bm25_scores import normalize_bm25_top_k
 
 OUTPUT_FIELDS = [
@@ -22,6 +22,8 @@ OUTPUT_FIELDS = [
     "created_at",
     "embedding",
 ]
+CONTENT_FIELDS = [field for field in OUTPUT_FIELDS if field != "embedding"]
+FETCH_BATCH_SIZE = 32
 
 BM25_SPARSE_FIELD = "sparse"
 BM25_FUNCTION_NAME = "text_bm25_emb"
@@ -263,6 +265,7 @@ class MilvusVectorStore:
         date_start: int | None = None,
         date_end: int | None = None,
         ids: list[str] | None = None,
+        metadata_filter: dict[str, str] | None = None,
     ) -> str | None:
         clauses: list[str] = []
 
@@ -281,6 +284,25 @@ class MilvusVectorStore:
         if ids_expr:
             clauses.append(ids_expr)
 
+        meta_expr = self._expr_for_metadata(metadata_filter)
+        if meta_expr:
+            clauses.append(meta_expr)
+
+        if not clauses:
+            return None
+        return " and ".join(clauses)
+
+    @staticmethod
+    def _expr_for_metadata(metadata_filter: dict[str, str] | None) -> str | None:
+        if not metadata_filter:
+            return None
+        clauses: list[str] = []
+        for key, value in metadata_filter.items():
+            if value is None or str(value).strip() == "":
+                continue
+            safe_key = str(key).replace('"', "")
+            safe_val = str(value).strip().replace("\\", "\\\\").replace('"', '\\"')
+            clauses.append(f'metadata["{safe_key}"] == "{safe_val}"')
         if not clauses:
             return None
         return " and ".join(clauses)
@@ -307,7 +329,7 @@ class MilvusVectorStore:
                 "kind": node.kind.value,
                 "title": node.title,
                 "text": node.text,
-                "metadata": dict(node.metadata),
+                "metadata": public_metadata(node.metadata),
                 "child_ids": list(node.child_ids),
                 "created_at": node.created_at or 0,
                 "embedding": _vector_to_list(node.embedding),
@@ -346,7 +368,7 @@ class MilvusVectorStore:
                     "kind": node.kind.value,
                     "title": node.title,
                     "text": node.text,
-                    "metadata": dict(node.metadata),
+                    "metadata": public_metadata(node.metadata),
                     "child_ids": list(node.child_ids),
                     "created_at": node.created_at or 0,
                     "embedding": _vector_to_list(_bytes_to_float_list(full_emb)),
@@ -363,7 +385,7 @@ class MilvusVectorStore:
         results = self._client.query(
             collection_name=self._collection_name,
             filter=expr,
-            output_fields=OUTPUT_FIELDS,
+            output_fields=CONTENT_FIELDS,
             limit=1,
         )
         if not results:
@@ -373,16 +395,22 @@ class MilvusVectorStore:
     def fetch_nodes(self, node_ids: Sequence[str]) -> dict[str, dict]:
         if not node_ids:
             return {}
-        expr = self._expr_for_ids(list(node_ids))
-        if not expr:
-            return {}
-
-        results = self._client.query(
-            collection_name=self._collection_name,
-            filter=expr,
-            output_fields=OUTPUT_FIELDS,
-        )
-        return {r["node_id"]: self._row_to_dict(r) for r in results}
+        unique_ids = list(dict.fromkeys(str(node_id) for node_id in node_ids if node_id))
+        fetched: dict[str, dict] = {}
+        for start in range(0, len(unique_ids), FETCH_BATCH_SIZE):
+            batch = unique_ids[start : start + FETCH_BATCH_SIZE]
+            expr = self._expr_for_ids(batch)
+            if not expr:
+                continue
+            results = self._client.query(
+                collection_name=self._collection_name,
+                filter=expr,
+                output_fields=CONTENT_FIELDS,
+                limit=len(batch),
+            )
+            for row in results:
+                fetched[row["node_id"]] = self._row_to_dict(row)
+        return fetched
 
     @staticmethod
     def _row_to_dict(row: dict) -> dict:
@@ -392,7 +420,7 @@ class MilvusVectorStore:
             "kind": row.get("kind", ""),
             "title": row.get("title", ""),
             "text": row.get("text", ""),
-            "metadata": row.get("metadata", {}) or {},
+            "metadata": public_metadata(row.get("metadata") or {}),
             "child_ids": row.get("child_ids", []) or [],
             "created_at": row.get("created_at", 0) or 0,
             "embedding": row.get("embedding"),
@@ -428,6 +456,7 @@ class MilvusVectorStore:
         *,
         date_start: int | None = None,
         date_end: int | None = None,
+        metadata_filter: dict[str, str] | None = None,
     ) -> list[tuple[str, float]]:
         if not collection_name:
             return []
@@ -436,6 +465,7 @@ class MilvusVectorStore:
             kinds,
             date_start=date_start,
             date_end=date_end,
+            metadata_filter=metadata_filter,
         )
         results = self._client.search(
             collection_name=collection_name,
@@ -461,6 +491,7 @@ class MilvusVectorStore:
         *,
         date_start: int | None = None,
         date_end: int | None = None,
+        metadata_filter: dict[str, str] | None = None,
     ) -> list[list[tuple[str, float]]]:
         if not collection_name or not query_vectors:
             return [[] for _ in query_vectors]
@@ -469,6 +500,7 @@ class MilvusVectorStore:
             kinds,
             date_start=date_start,
             date_end=date_end,
+            metadata_filter=metadata_filter,
         )
         results = self._client.search(
             collection_name=collection_name,
@@ -500,6 +532,7 @@ class MilvusVectorStore:
         *,
         date_start: int | None = None,
         date_end: int | None = None,
+        metadata_filter: dict[str, str] | None = None,
     ) -> list[list[tuple[str, float]]]:
         if k <= 0 or not query_texts:
             return [[] for _ in query_texts]
@@ -508,6 +541,7 @@ class MilvusVectorStore:
             kinds,
             date_start=date_start,
             date_end=date_end,
+            metadata_filter=metadata_filter,
         )
         batch_data: list[str] = []
         batch_indices: list[int] = []
@@ -548,6 +582,7 @@ class MilvusVectorStore:
         *,
         date_start: int | None = None,
         date_end: int | None = None,
+        metadata_filter: dict[str, str] | None = None,
     ) -> list[tuple[str, float]]:
         """Zilliz BM25 full-text search on sparse field (chinese analyzer)."""
         query = (query_text or "").strip()
@@ -558,6 +593,7 @@ class MilvusVectorStore:
             kinds,
             date_start=date_start,
             date_end=date_end,
+            metadata_filter=metadata_filter,
         )
         results = self._client.search(
             collection_name=self._collection_name,
@@ -610,6 +646,7 @@ class MilvusVectorStore:
         *,
         date_start: int | None = None,
         date_end: int | None = None,
+        metadata_filter: dict[str, str] | None = None,
     ) -> list[dict]:
         if not collection_name:
             return []
@@ -618,6 +655,7 @@ class MilvusVectorStore:
             kinds,
             date_start=date_start,
             date_end=date_end,
+            metadata_filter=metadata_filter,
         )
         results = self._client.search(
             collection_name=collection_name,

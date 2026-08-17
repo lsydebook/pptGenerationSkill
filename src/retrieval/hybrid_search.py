@@ -1,4 +1,4 @@
-"""混合检索、去重、重排、上下文扩展。"""
+"""混合检索：Dense + BM25 → RRF 融合 → 扩邻居 → neural rerank。"""
 
 from __future__ import annotations
 
@@ -7,25 +7,31 @@ from dataclasses import dataclass
 from typing import Literal
 
 from src.config.embedding import EmbeddingModel
+from src.config.llm_config import RERANK_CANDIDATES, RERANK_ENABLED
+from src.config.logging_config import get_logger
 from src.config.retrieval_config import (
     CHILD_DEPTH,
     DEDUPLICATE_RETRIEVAL,
+    INCLUDE_SIBLINGS,
     PARENT_DEPTH,
     RERANK_STRATEGY,
     RETRIEVAL_BM25_TOP_K,
     RETRIEVAL_TOP_K,
-    SNIPPET_DEDUP,
+    RRF_K,
     TOP_K_FINAL,
 )
 from src.parsing.document_types import ContextSnippet, NodeKind, RetrievalMatch
-from src.retrieval.context_snippets import matches_to_snippets
+from src.retrieval.context_snippets import (
+    expand_matches_to_retrieval,
+    stitch_consecutive_matches,
+)
 from src.retrieval.query_planner import LLMQueryPlanner, SimpleQueryPlanner
-from src.config.logging_config import get_logger
+from src.retrieval.reranker import rerank_matches as neural_rerank_matches
 from src.storage.milvus_rag_node_store import MilvusPostgresNodeStore
 
 logger = get_logger(__name__)
 
-RerankStrategy = Literal["frequency", "score", "combined"] | None
+RerankStrategy = Literal["rrf", "frequency", "score", "combined"] | None
 
 
 @dataclass
@@ -34,6 +40,48 @@ class RetrievalResult:
     queries: list[str]
     matches: list[RetrievalMatch]
     snippets: list[ContextSnippet]
+
+
+def _clean_metadata_filter(
+    metadata_filter: dict[str, str] | None,
+) -> dict[str, str] | None:
+    if not metadata_filter:
+        return None
+    cleaned = {
+        key: str(value).strip()
+        for key, value in metadata_filter.items()
+        if value is not None and str(value).strip()
+    }
+    return cleaned or None
+
+
+def reciprocal_rank_fusion(
+    ranked_lists: list[list[RetrievalMatch]],
+    *,
+    k: int = 60,
+) -> list[RetrievalMatch]:
+    """RRF：score(d) = Σ 1 / (k + rank_i(d))，与原始分数尺度无关。"""
+    if not ranked_lists:
+        return []
+    rrf_k = max(1, k)
+    scores: dict[str, float] = {}
+    best: dict[str, RetrievalMatch] = {}
+    for ranked in ranked_lists:
+        seen: set[str] = set()
+        for rank, match in enumerate(ranked, start=1):
+            node_id = match.node.node_id
+            if node_id in seen:
+                continue
+            seen.add(node_id)
+            scores[node_id] = scores.get(node_id, 0.0) + 1.0 / (rrf_k + rank)
+            prev = best.get(node_id)
+            if prev is None or match.score > prev.score:
+                best[node_id] = match
+    ordered = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    return [
+        RetrievalMatch(node=best[node_id].node, score=score)
+        for node_id, score in ordered
+    ]
 
 
 def deduplicate_matches(matches: list[RetrievalMatch]) -> list[RetrievalMatch]:
@@ -173,8 +221,9 @@ async def hybrid_retrieve(
     top_k: int | None = None,
     bm25_top_k: int | None = None,
     use_planner: bool = True,
+    metadata_filter: dict[str, str] | None = None,
 ) -> RetrievalResult:
-    """Query 扩写 → Dense + BM25 混合检索 → 去重重排 → 上下文扩展。"""
+    """Query 扩写 → Dense + BM25 混合检索 → 融合重排 → 上下文扩展。"""
     logger.info("hybrid_retrieve start use_planner=%s", use_planner)
     active_planner = planner if use_planner else SimpleQueryPlanner()
     queries = list(await active_planner.plan(question))
@@ -187,6 +236,7 @@ async def hybrid_retrieve(
         embedder=embedder,
         top_k=top_k,
         bm25_top_k=bm25_top_k,
+        metadata_filter=metadata_filter,
     )
 
 
@@ -198,12 +248,14 @@ async def execute_hybrid_search(
     embedder: EmbeddingModel,
     top_k: int | None = None,
     bm25_top_k: int | None = None,
+    metadata_filter: dict[str, str] | None = None,
 ) -> RetrievalResult:
-    """向量检索 + 重排 + 上下文扩展（不含 LLM query 扩写）。"""
+    """向量检索 + 融合 + 上下文扩展（不含 LLM query 扩写）。"""
     if not queries:
         raise ValueError("queries must not be empty")
 
-    logger.info("execute_hybrid_search start query_count=%s", len(queries))
+    filters = _clean_metadata_filter(metadata_filter)
+    logger.info("execute_hybrid_search start query_count=%s filter=%s", len(queries), filters)
     logger.info("step 1/5 query_plan done count=%s queries=%s", len(queries), queries)
 
     query_vectors = await embedder.embed_text(queries)
@@ -218,82 +270,109 @@ async def execute_hybrid_search(
         len(queries),
     )
 
-    all_matches: list[RetrievalMatch] = []
     vectors = [vector.tolist() for vector in query_vectors]
     use_bm25 = bm25_k > 0 and store.has_bm25_index()
 
     if use_bm25:
         dense_batches, bm25_batches = await asyncio.gather(
-            store.search_dense_batch(vectors, k=k, kinds=search_kinds),
-            store.search_bm25_batch(queries, k=bm25_k, kinds=search_kinds),
+            store.search_dense_batch(
+                vectors, k=k, kinds=search_kinds, metadata_filter=filters
+            ),
+            store.search_bm25_batch(
+                queries, k=bm25_k, kinds=search_kinds, metadata_filter=filters
+            ),
         )
     else:
-        dense_batches = await store.search_dense_batch(vectors, k=k, kinds=search_kinds)
+        dense_batches = await store.search_dense_batch(
+            vectors, k=k, kinds=search_kinds, metadata_filter=filters
+        )
         bm25_batches = [[] for _ in queries]
 
+    ranked_lists: list[list[RetrievalMatch]] = []
+    all_matches: list[RetrievalMatch] = []
     for idx, (query_text, dense_hits, bm25_hits) in enumerate(
         zip(queries, dense_batches, bm25_batches, strict=True),
         1,
     ):
+        ranked_lists.append(dense_hits)
+        if use_bm25:
+            ranked_lists.append(bm25_hits)
         query_hits = merge_matches_keep_max_score(dense_hits + bm25_hits)
         all_matches.extend(query_hits)
-
-        dense_preview = [
-            (m.node.node_id, round(m.score, 4)) for m in dense_hits[:3]
-        ]
-        bm25_preview = [
-            (m.node.node_id, round(m.score, 4)) for m in bm25_hits[:3]
-        ]
         logger.info(
             "step 3/5 hybrid_search query[%s/%s] q=%r dense=%s bm25=%s merged=%s",
             idx,
             len(queries),
             query_text[:80],
-            dense_preview,
-            bm25_preview if use_bm25 else "off",
+            [(m.node.node_id, round(m.score, 4)) for m in dense_hits[:3]],
+            [(m.node.node_id, round(m.score, 4)) for m in bm25_hits[:3]]
+            if use_bm25
+            else "off",
             len(query_hits),
         )
-    logger.info("step 3/5 hybrid_search done raw_matches=%s", len(all_matches))
+    logger.info("step 3/5 hybrid_search done raw_matches=%s lists=%s", len(all_matches), len(ranked_lists))
 
-    before_dedup = len(all_matches)
-    all_matches = tree_deduplicate_matches(all_matches)
-    if DEDUPLICATE_RETRIEVAL and not RERANK_STRATEGY:
-        all_matches = deduplicate_matches(all_matches)
-    if RERANK_STRATEGY:
-        all_matches = rerank_matches(all_matches, strategy=RERANK_STRATEGY)
-    if TOP_K_FINAL > 0:
-        all_matches = all_matches[:TOP_K_FINAL]
+    strategy = (RERANK_STRATEGY or "rrf").lower()
+    before_fusion = len(all_matches)
+    if strategy == "rrf":
+        fused = reciprocal_rank_fusion(ranked_lists, k=RRF_K)
+    else:
+        fused = rerank_matches(all_matches, strategy=strategy) if strategy else deduplicate_matches(all_matches)
+        if DEDUPLICATE_RETRIEVAL and not strategy:
+            fused = deduplicate_matches(fused)
+
+    fused = tree_deduplicate_matches(fused)
+
+    snippets: list[ContextSnippet]
+    if RERANK_ENABLED:
+        seed = fused[: max(RERANK_CANDIDATES, TOP_K_FINAL)]
+        expanded = await expand_matches_to_retrieval(
+            seed,
+            store,
+            parent_depth=PARENT_DEPTH,
+            child_depth=CHILD_DEPTH,
+            include_siblings=INCLUDE_SIBLINGS,
+            limit=max(RERANK_CANDIDATES * 3, 80),
+        )
+        logger.info(
+            "step 4/5 expand_before_rerank seed=%s expanded=%s siblings=%s",
+            len(seed),
+            len(expanded),
+            INCLUDE_SIBLINGS,
+        )
+        fused = await neural_rerank_matches(question, expanded)
+        fused = tree_deduplicate_matches(fused)
+        if TOP_K_FINAL > 0:
+            fused = fused[:TOP_K_FINAL]
+        snippets = await stitch_consecutive_matches(fused, store)
+    else:
+        if TOP_K_FINAL > 0:
+            fused = fused[:TOP_K_FINAL]
+        neighbor_matches = await expand_matches_to_retrieval(
+            fused,
+            store,
+            parent_depth=PARENT_DEPTH,
+            child_depth=CHILD_DEPTH,
+            include_siblings=INCLUDE_SIBLINGS,
+        )
+        snippets = await stitch_consecutive_matches(neighbor_matches, store)
+
     top_preview = [
         (m.node.node_id, round(m.score, 4), m.node.text[:40].replace("\n", " "))
-        for m in all_matches[:5]
+        for m in fused[:5]
     ]
     logger.info(
-        "step 4/5 dedup_rerank done strategy=%s before=%s after=%s top_k_final=%s top5=%s",
-        RERANK_STRATEGY or "none",
-        before_dedup,
-        len(all_matches),
-        TOP_K_FINAL,
-        top_preview,
-    )
-
-    snippets = await matches_to_snippets(
-        all_matches,
-        store,
-        parent_depth=PARENT_DEPTH,
-        child_depth=CHILD_DEPTH,
-        dedup=SNIPPET_DEDUP,  # type: ignore[arg-type]
-    )
-
-    logger.info(
-        "step 5/5 context_expand done snippets=%s parent_depth=%s child_depth=%s dedup=%s",
+        "step 5/5 fusion_rerank done strategy=%s neural=%s before=%s after=%s snippets=%s top5=%s",
+        strategy,
+        RERANK_ENABLED,
+        before_fusion,
+        len(fused),
         len(snippets),
-        PARENT_DEPTH,
-        CHILD_DEPTH,
-        SNIPPET_DEDUP,
+        top_preview,
     )
     return RetrievalResult(
         question=question,
         queries=queries,
-        matches=all_matches,
+        matches=fused,
         snippets=snippets,
     )

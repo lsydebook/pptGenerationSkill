@@ -4,6 +4,16 @@ from typing import Any
 
 import numpy as np
 
+# Stored on paragraph nodes when PARAGRAPH_MODE=both so the para-full
+# collection can be written. Never expose this on retrieve/answer APIs.
+INTERNAL_METADATA_KEYS = frozenset({"full_embedding"})
+
+
+def public_metadata(meta: dict[str, Any] | None) -> dict[str, Any]:
+    if not meta:
+        return {}
+    return {k: v for k, v in meta.items() if k not in INTERNAL_METADATA_KEYS}
+
 
 class NodeKind(str, Enum):
     DOCUMENT = "document"

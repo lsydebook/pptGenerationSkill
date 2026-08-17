@@ -15,6 +15,15 @@ TABLE_SEPARATOR_RE = re.compile(
     r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$"
 )
 FENCE_RE = re.compile(r"^(`{3,}|~{3,})(.*)$")
+IMAGE_LINE_RE = re.compile(r"^!\[([^\]]*)\]\(([^)]+)\)(?:\{[^}]*\})?\s*$")
+HTML_IMG_RE = re.compile(
+    r'<img\b[^>]*(?:alt=["\']([^"\']*)["\'])[^>]*>',
+    re.IGNORECASE,
+)
+CAPTION_RE = re.compile(
+    r"^(图|表|Figure|Table)\s*[\d一二三四五六七八九十]+",
+    re.IGNORECASE,
+)
 
 
 def _normalize_newlines(text: str) -> str:
@@ -65,6 +74,23 @@ def _format_table_row(headers: list[str], cells: list[str]) -> str:
     return "\n".join(lines)
 
 
+def _looks_like_caption(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped or len(stripped) > 80:
+        return False
+    return bool(CAPTION_RE.match(stripped))
+
+
+def _pop_caption(prose_buffer: list[str]) -> str | None:
+    if not prose_buffer:
+        return None
+    joined = "\n".join(prose_buffer).strip()
+    if _looks_like_caption(joined):
+        prose_buffer.clear()
+        return joined
+    return None
+
+
 def _paragraph_from_text(
     text: str,
     *,
@@ -74,14 +100,18 @@ def _paragraph_from_text(
     text = text.strip()
     meta = dict(metadata or {})
     block_type = meta.get("block_type", "paragraph")
-    if atomic or block_type in {"code", "table_row"}:
+    if atomic or block_type in {"code", "table_row", "image"}:
         sentences = [SentencePayload(text=text)] if text else []
     else:
         sentences = [SentencePayload(text=s) for s in split_sentences(text)]
     return ParagraphPayload(text=text, sentences=sentences or None, metadata=meta)
 
 
-def _parse_table_block(table_lines: list[str]) -> list[ParagraphPayload]:
+def _parse_table_block(
+    table_lines: list[str],
+    *,
+    caption: str | None = None,
+) -> list[ParagraphPayload]:
     if not table_lines:
         return []
 
@@ -102,6 +132,8 @@ def _parse_table_block(table_lines: list[str]) -> list[ParagraphPayload]:
     paragraphs: list[ParagraphPayload] = []
     for row_index, cells in enumerate(data_rows, start=1):
         row_text = _format_table_row(header or [], cells)
+        if caption:
+            row_text = f"{caption}\n{row_text}"
         if not row_text.strip():
             continue
         paragraphs.append(
@@ -112,6 +144,7 @@ def _parse_table_block(table_lines: list[str]) -> list[ParagraphPayload]:
                     "row_index": row_index,
                     "column_count": len(cells),
                     "table_headers": header or [],
+                    "caption": caption,
                 },
                 atomic=True,
             )
@@ -175,6 +208,30 @@ def parse_markdown_sections(
             index += 1
             continue
 
+        image_match = IMAGE_LINE_RE.match(line.strip())
+        html_img = HTML_IMG_RE.search(line) if "<img" in line.lower() else None
+        if image_match or html_img:
+            caption = _pop_caption(prose_buffer)
+            if caption is None:
+                flush_prose()
+            alt = image_match.group(1).strip() if image_match else (html_img.group(1) or "").strip()
+            src = image_match.group(2).strip() if image_match else ""
+            caption_text = caption or alt or "图像"
+            paragraphs.append(
+                _paragraph_from_text(
+                    caption_text,
+                    metadata={
+                        "block_type": "image",
+                        "alt": alt or None,
+                        "source": src or None,
+                        "caption": caption,
+                    },
+                    atomic=True,
+                )
+            )
+            index += 1
+            continue
+
         fence_match = FENCE_RE.match(line.strip())
         if fence_match:
             flush_prose()
@@ -204,12 +261,14 @@ def parse_markdown_sections(
             continue
 
         if _is_table_line(line):
-            flush_prose()
+            caption = _pop_caption(prose_buffer)
+            if caption is None:
+                flush_prose()
             table_lines: list[str] = []
             while index < len(lines) and _is_table_line(lines[index]):
                 table_lines.append(lines[index])
                 index += 1
-            paragraphs.extend(_parse_table_block(table_lines))
+            paragraphs.extend(_parse_table_block(table_lines, caption=caption))
             continue
 
         list_match = LIST_ITEM_RE.match(line)
@@ -255,6 +314,10 @@ def parse_markdown_sections(
             continue
 
         if not line.strip():
+            joined = "\n".join(prose_buffer).strip()
+            if joined and _looks_like_caption(joined):
+                index += 1
+                continue
             flush_prose()
             index += 1
             continue

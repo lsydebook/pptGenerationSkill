@@ -35,10 +35,18 @@ RAG_TABLE_PREFIX = get_env("RAG_TABLE_PREFIX", "rag_nodes")
 RAG_VEC_COLLECTION_SUFFIX = get_env("RAG_VEC_COLLECTION_SUFFIX", "v1")
 # BM25 全文检索 text 字段 analyzer 类型（Zilliz 内置 chinese / standard 等）
 MILVUS_BM25_ANALYZER = get_env("MILVUS_BM25_ANALYZER", "chinese")
-# 段落向量策略：averaged（子句平均）| full（整段编码）| both（两种都存）
-PARAGRAPH_MODE = get_env("PARAGRAPH_MODE", "averaged")
+# 段落向量策略：averaged（子句平均）| full（整段编码）| both（平均入库主表 + 整段写入 para_full）
+PARAGRAPH_MODE = get_env("PARAGRAPH_MODE", "both")
 # DOCUMENT 根节点 text 字段仅存摘要的最大字符数（全文在段落/句子子节点中）
 DOCUMENT_SUMMARY_MAX_CHARS = get_int("DOCUMENT_SUMMARY_MAX_CHARS", 2000)
+# SECTION 节点 text：标题 + 段落摘要，供上下文扩展（默认不直接检索 section）
+SECTION_SUMMARY_MAX_CHARS = get_int("SECTION_SUMMARY_MAX_CHARS", 800)
+# 短于该字数的句子与后续句合并后再 embed，降低中文半句噪声
+MIN_SENTENCE_CHARS = get_int("MIN_SENTENCE_CHARS", 40)
+# 单段超过该字数则按句切成多个 PARAGRAPH 节点（论文墙文本 / 无空行 PDF）
+MAX_PARAGRAPH_CHARS = get_int("MAX_PARAGRAPH_CHARS", 1800)
+# 单句超过该字数则硬切（无标点长文常被当成一句）
+MAX_SENTENCE_CHARS = get_int("MAX_SENTENCE_CHARS", 800)
 # Milvus 向量索引类型：HNSW | IVF_FLAT | FLAT
 MILVUS_INDEX_TYPE = get_env("MILVUS_INDEX_TYPE", "HNSW")
 # 向量距离度量：COSINE | IP | L2
