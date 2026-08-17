@@ -2,3 +2,5 @@ __pycache__/
 logs/
 *.log
 data/uploads/
+pptGenerationSkill-lz/
+test/
