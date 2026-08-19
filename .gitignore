@@ -3,3 +3,6 @@ logs/
 *.log
 data/uploads/
 test/
+
+# 本地环境变量（含密钥，勿提交）
+.env
