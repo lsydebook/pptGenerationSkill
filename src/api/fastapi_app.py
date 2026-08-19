@@ -1,5 +1,8 @@
-from contextlib import asynccontextmanager
+import asyncio
+import os
+from contextlib import asynccontextmanager, suppress
 
+import httpx
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
@@ -17,7 +20,7 @@ from src.api.http_schemas import (
 )
 from src.cache.redis_client import close_redis, get_redis, init_redis
 from src.concurrency.priority import coordinator
-from src.config.logging_config import get_logger, setup_logging
+from src.config.logging_config import attach_uvicorn_probe_filter, get_logger, setup_logging
 from src.jobs.ingestion_queue import JobStatus, ingestion_jobs
 from src.rag_answer import init_answer, run_answer, shutdown_answer
 from src.rag_parsing import (
@@ -63,8 +66,41 @@ def _job_to_status_response(record: dict) -> JobStatusResponse:
     )
 
 
+def _health_probe_url() -> str:
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", "8000"))
+    probe_host = "127.0.0.1" if host in {"0.0.0.0", "::", ""} else host
+    return f"http://{probe_host}:{port}/health"
+
+
+async def _startup_health_probe() -> None:
+    url = _health_probe_url()
+    deadline = asyncio.get_running_loop().time() + 10.0
+    async with httpx.AsyncClient(timeout=2.0) as client:
+        while True:
+            try:
+                response = await client.get(url)
+                payload = response.json()
+                logger.info(
+                    "GET /health %s status=%s redis=%s ingestion_pending=%s ingestion_running=%s retrieval_active=%s",
+                    response.status_code,
+                    payload.get("status"),
+                    payload.get("redis"),
+                    payload.get("ingestion_pending"),
+                    payload.get("ingestion_running"),
+                    payload.get("retrieval_active"),
+                )
+                return
+            except (httpx.HTTPError, ValueError):
+                if asyncio.get_running_loop().time() >= deadline:
+                    logger.warning("startup health check failed url=%s", url)
+                    return
+                await asyncio.sleep(0.1)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    attach_uvicorn_probe_filter()
     logger.info("application startup")
     await init_redis()
     await init_parsing()
@@ -72,7 +108,11 @@ async def lifespan(_app: FastAPI):
     init_answer()
     await ingestion_jobs.start()
     logger.info("application ready")
+    health_probe = asyncio.create_task(_startup_health_probe())
     yield
+    health_probe.cancel()
+    with suppress(asyncio.CancelledError):
+        await health_probe
     logger.info("application shutdown")
     await ingestion_jobs.stop()
     shutdown_answer()

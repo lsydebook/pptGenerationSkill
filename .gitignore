@@ -2,6 +2,8 @@ __pycache__/
 logs/
 *.log
 data/uploads/
+data/eval/
+eval/results/
 test/
 
 # 本地环境变量（含密钥，勿提交）

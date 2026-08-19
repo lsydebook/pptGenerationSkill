@@ -16,6 +16,14 @@ _DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 _LOG_DIR = ROOT_DIR / "logs"
 _log_file: Path | None = None
 _configured = False
+_PROBE_ACCESS_PATHS = frozenset(
+    {
+        "/",
+        "/json/version",
+        "/json/list",
+        "/favicon.ico",
+    }
+)
 
 
 class DetailFormatter(logging.Formatter):
@@ -29,6 +37,40 @@ class DetailFormatter(logging.Formatter):
             f"[{timestamp}] [{process_label}] [{record.levelname}] "
             f"[{record.threadName}] [{location}] {record.getMessage()}"
         )
+
+
+class UvicornProbeAccessFilter(logging.Filter):
+    """Drop Chrome DevTools / browser probes that hit this API port."""
+
+    def filter(self, record: LogRecord) -> bool:
+        path = _access_path(record)
+        if path is None:
+            return True
+        return path.split("?", 1)[0] not in _PROBE_ACCESS_PATHS
+
+
+def _access_path(record: LogRecord) -> str | None:
+    args = record.args
+    if isinstance(args, tuple) and len(args) >= 3 and isinstance(args[2], str):
+        return args[2]
+    message = record.getMessage()
+    for marker in ('"GET ', '"HEAD '):
+        start = message.find(marker)
+        if start < 0:
+            continue
+        start += len(marker)
+        end = message.find(" HTTP/", start)
+        if end > start:
+            return message[start:end]
+    return None
+
+
+def attach_uvicorn_probe_filter() -> None:
+    """uvicorn 会在启动时重建 access logger，须在其完成配置后再挂过滤。"""
+    access = logging.getLogger("uvicorn.access")
+    if any(isinstance(item, UvicornProbeAccessFilter) for item in access.filters):
+        return
+    access.addFilter(UvicornProbeAccessFilter())
 
 
 def _process_name() -> str:
