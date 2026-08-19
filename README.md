@@ -1,10 +1,4 @@
-# pptGenerationSkill
-
-研究生周报场景的 **层级混合 RAG 服务**：文档入库 → Dense/BM25 检索 → 可选生成答案。
-
-> `.pptx` 等仍是输入格式。PPT 生成尚未接入。本次对齐 KohakuRAG：长度加权聚合、兄弟句扩展、RRF、生成侧 `/v1/answer`。LLM Wiki 尚未加入。
-
-**入库变更后请重新 parse。** `.env` 已将 `RAG_VEC_COLLECTION_SUFFIX` 设为 `v2`、`PARAGRAPH_MODE=both`，旧 `v1` collection 不会自动迁移。
+## **层级混合 RAG 服务**：文档入库 → Dense/BM25 检索 → 可选生成答案。
 
 ## 能力概览
 
@@ -65,13 +59,15 @@ POST /v1/answer
 
 ## API
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| `GET` | `/health` | 健康检查 |
-| `POST` | `/v1/parse` | 入库（`file` / `text` / `note`）→ **202**；同一文件已在库中 → **200** `already_indexed` |
-| `GET` | `/v1/jobs/{job_id}` | 轮询入库任务状态 |
-| `POST` | `/v1/retrieve` | 检索 |
-| `POST` | `/v1/answer` | 检索 + 生成 |
+
+| 方法     | 路径                  | 说明                                                                         |
+| ------ | ------------------- | -------------------------------------------------------------------------- |
+| `GET`  | `/health`           | 健康检查                                                                       |
+| `POST` | `/v1/parse`         | 入库（`file` / `text` / `note`）→ **202**；同一文件已在库中 → **200** `already_indexed` |
+| `GET`  | `/v1/jobs/{job_id}` | 轮询入库任务状态                                                                   |
+| `POST` | `/v1/retrieve`      | 检索                                                                         |
+| `POST` | `/v1/answer`        | 检索 + 生成                                                                    |
+
 
 ### 入库示例
 
@@ -97,10 +93,12 @@ curl -s -X POST http://127.0.0.1:8000/v1/retrieve \
   }'
 ```
 
-| 字段 | 说明 |
-|------|------|
-| `question` | 用户问题（必填） |
+
+| 字段            | 说明                         |
+| ------------- | -------------------------- |
+| `question`    | 用户问题（必填）                   |
 | `use_planner` | 是否 LLM 扩写多 query；默认 `true` |
+
 
 Dense / BM25 召回数由 `.env` 的 `RETRIEVAL_TOP_K`、`RETRIEVAL_BM25_TOP_K` 决定，接口不接收。
 
@@ -114,17 +112,6 @@ curl -s -X POST http://127.0.0.1:8000/v1/answer \
     "use_planner": true
   }'
 ```
-
-## 评测
-
-将 `test/eval/golden_qa.example.json` 复制为 `test/eval/golden_qa.json`，补全 30～50 条并填写 `relevant_doc_ids` 或 `relevant_node_ids`：
-
-```bash
-uv run python -m test.eval.eval_retrieval --offline
-uv run python -m test.eval.eval_retrieval --base-url http://127.0.0.1:8000
-```
-
-输出 hit@k 与 MRR。
 
 ## 项目结构
 
@@ -143,7 +130,6 @@ src/
   concurrency/              # 检索优先协调
   config/                   # .env 驱动配置
   param/param_zh.py         # 中文 Planner 提示词
-test/                       # 单测与 probe 脚本
 data/uploads/               # 入库暂存（运行时生成）
 logs/                       # 按日滚动日志
 ```
@@ -152,16 +138,18 @@ logs/                       # 按日滚动日志
 
 通过 `src/config/` 读取，主要变量：
 
-| 类别 | 变量 |
-|------|------|
-| Milvus | `MILVUS_URI`、`MILVUS_TOKEN`、`MILVUS_DB`、`RAG_TABLE_PREFIX`、`RAG_VEC_COLLECTION_SUFFIX` |
-| Embedding | `EMBEDDING_MODEL`、`EMBEDDING_DIM`、`EMBEDDING_BASE_URL`、`EMBEDDING_API_KEY`、`EMBEDDING_MAX_CHARS` |
-| Planner | `PLANNER_BASE_URL`、`PLANNER_API_KEY`、`PLANNER_MODEL`、`PLANNER_MAX_QUERIES` |
-| Redis | `REDIS_URL`、`JOB_TTL_SECONDS`、`RAG_CACHE_ENABLED`、`RAG_CACHE_TTL_SECONDS` |
-| 检索 | `RETRIEVAL_TOP_K`、`RETRIEVAL_BM25_TOP_K`、`RERANK_STRATEGY`（默认 `rrf`）、`INCLUDE_SIBLINGS`、`SNIPPET_RETURN_MODE` |
-| Rerank | `RERANK_ENABLED`（默认开启）、`RERANK_BASE_URL`、`RERANK_MODEL`（`jina-reranker-m0`） |
-| 生成 | `ANSWER_MAX_RETRIES`、`ANSWER_ENSEMBLE_SIZE`、`ANSWER_K_DELTA` |
-| 其它 | `PARAGRAPH_MODE`（默认 `both`）、`MAX_PARAGRAPH_CHARS`、`MAX_SENTENCE_CHARS`、`MIN_SENTENCE_CHARS`、`UPLOAD_DIR` |
+
+| 类别        | 变量                                                                                                            |
+| --------- | ------------------------------------------------------------------------------------------------------------- |
+| Milvus    | `MILVUS_URI`、`MILVUS_TOKEN`、`MILVUS_DB`、`RAG_TABLE_PREFIX`、`RAG_VEC_COLLECTION_SUFFIX`                        |
+| Embedding | `EMBEDDING_MODEL`、`EMBEDDING_DIM`、`EMBEDDING_BASE_URL`、`EMBEDDING_API_KEY`、`EMBEDDING_MAX_CHARS`              |
+| Planner   | `PLANNER_BASE_URL`、`PLANNER_API_KEY`、`PLANNER_MODEL`、`PLANNER_MAX_QUERIES`                                    |
+| Redis     | `REDIS_URL`、`JOB_TTL_SECONDS`、`RAG_CACHE_ENABLED`、`RAG_CACHE_TTL_SECONDS`                                     |
+| 检索        | `RETRIEVAL_TOP_K`、`RETRIEVAL_BM25_TOP_K`、`RERANK_STRATEGY`（默认 `rrf`）、`INCLUDE_SIBLINGS`、`SNIPPET_RETURN_MODE` |
+| Rerank    | `RERANK_ENABLED`（默认开启）、`RERANK_BASE_URL`、`RERANK_MODEL`（`jina-reranker-m0`）                                   |
+| 生成        | `ANSWER_MAX_RETRIES`、`ANSWER_ENSEMBLE_SIZE`、`ANSWER_K_DELTA`                                                  |
+| 其它        | `PARAGRAPH_MODE`（默认 `both`）、`MAX_PARAGRAPH_CHARS`、`MAX_SENTENCE_CHARS`、`MIN_SENTENCE_CHARS`、`UPLOAD_DIR`      |
+
 
 Embedding 未单独配置时，默认复用 Planner 的网关地址与 Key。
 
