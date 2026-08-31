@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from src.config.env_loader import get_bool, get_env, get_int
 
-REDIS_URL = get_env("REDIS_URL")
+REDIS_URL = get_env("REDIS_URL").strip().strip('"').strip("'")
+# 校园网等拦 TCP 6379 时走 Upstash HTTPS REST
+UPSTASH_REDIS_REST_URL = get_env("UPSTASH_REDIS_REST_URL").strip().strip('"').strip("'")
+UPSTASH_REDIS_REST_TOKEN = get_env("UPSTASH_REDIS_REST_TOKEN").strip().strip('"').strip("'")
 
 # 入库 job 状态在 Redis 中的 TTL（秒）
 JOB_TTL_SECONDS = get_int("JOB_TTL_SECONDS", 3600)
